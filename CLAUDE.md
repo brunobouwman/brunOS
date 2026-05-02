@@ -33,18 +33,27 @@ Set `BRUNOS_VAULT_PATH` in `.env`. Default on Mac: `/Users/brunobouwman/Document
 - **No secrets in vault**, ever.
 - Sources of truth: ClickUp = execution layer (tasks with status). Obsidian = thinking layer (decisions, context, lessons). Don't duplicate.
 
-## YAML frontmatter (every agent-written note)
+## YAML frontmatter (every vault file)
+
+Every file in `BrunOS/Memory/` carries this block — no exceptions, including the top-level singletons. Bruno uses Obsidian Properties to scan the vault, and inconsistent frontmatter breaks the filter.
 
 ```yaml
 ---
-type: meeting | project | client | research | goal | content | team | draft | digest | personal
+type: meeting | project | client | research | goal | content | team | draft | digest | personal | daily | system | reference
 created: 2026-05-02T09:00-03:00
+updated: 2026-05-02T09:00-03:00
 tags: [...]
 status: active | archived | done
 ---
 ```
 
-Drafts have an extended frontmatter (`source_id`, `recipient`, `subject`, `context`, `language`, `status`).
+Type assignments for non-obvious files:
+- `SOUL.md`, `USER.md`, `MEMORY.md`, `HEARTBEAT.md`, `HABITS.md` → `type: system`
+- `sources_of_truth.md` → `type: reference`
+- `daily/YYYY-MM-DD.md` → `type: daily`, `tags: [daily]`
+- Drafts → `type: draft` plus extended fields (`source_id`, `recipient`, `subject`, `context`, `language`)
+
+`updated` is stamped by `shared.atomic_write` (Phase 2) on every agent write. Hand-edits in Obsidian do NOT refresh it — treat the field as "last agent touch", not "last edit of any kind".
 
 ## Proactivity: Assistant level
 
