@@ -76,14 +76,22 @@ python3 -m venv .venv && source .venv/bin/activate && pip install -r requirement
 
 # Manually consolidate a transcript into today's daily log (Phase 2):
 python .claude/scripts/memory_flush.py <transcript-path>
+
+# Index / search BrunOS/Memory/ (Phase 3):
+python .claude/scripts/memory_index.py [--full] [--paths file1.md file2.md] [--dry-run]
+python .claude/scripts/memory_search.py "<query>" [--k 10] [--path-prefix drafts/sent]
 ```
+
+## Memory search (Phase 3)
+
+Embedding model: `BAAI/bge-small-en-v1.5` via FastEmbed (384-dim, asymmetric — `passage_embed` for indexing, `query_embed` for retrieval). Cache: `.claude/data/fastembed_cache/`. DB: `.claude/data/state/memory.db` (SQLite + sqlite-vec + FTS5; Postgres+pgvector path stubbed for Phase 9 VPS deploy). Hybrid retrieval merges vector top-k×3 + FTS top-k×3 via RRF (k=60). The indexer excludes `Memory/personal/finance.md` per the SOUL.md no-financial-data boundary.
 
 ## Phase status
 
 - [x] Phase 0 — Foundation prep (2026-05-02)
 - [x] Phase 1 — Memory layer (vault seeded manually 2026-05-01; BOOTSTRAP.md skipped by design)
 - [x] Phase 2 — Hooks (2026-05-02)
-- [ ] Phase 3 — Memory search (hybrid RAG)
+- [x] Phase 3 — Memory search (hybrid RAG) (2026-05-02)
 - [ ] Phase 4 — Integrations (Slack → GitHub → ClickUp → Gmail/Calendar → RSS)
 - [ ] Phase 5 — Skills (vault skill, weekly-review, news-digest)
 - [ ] Phase 6 — Heartbeat + Reflection + Drafts + Habits
