@@ -73,13 +73,16 @@ Every `ClaudeAgentOptions(...)` call MUST pass `setting_sources` explicitly (`No
 
 ```bash
 python3 -m venv .venv && source .venv/bin/activate && pip install -r requirements.txt
+
+# Manually consolidate a transcript into today's daily log (Phase 2):
+python .claude/scripts/memory_flush.py <transcript-path>
 ```
 
 ## Phase status
 
 - [x] Phase 0 — Foundation prep (2026-05-02)
 - [x] Phase 1 — Memory layer (vault seeded manually 2026-05-01; BOOTSTRAP.md skipped by design)
-- [ ] Phase 2 — Hooks
+- [x] Phase 2 — Hooks (2026-05-02)
 - [ ] Phase 3 — Memory search (hybrid RAG)
 - [ ] Phase 4 — Integrations (Slack → GitHub → ClickUp → Gmail/Calendar → RSS)
 - [ ] Phase 5 — Skills (vault skill, weekly-review, news-digest)
