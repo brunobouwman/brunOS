@@ -6,7 +6,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": ".claude/hooks/session-start-context.py"
+            "command": "uv run python .claude/hooks/session-start-context.py"
           }
         ]
       }
@@ -17,7 +17,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": ".claude/hooks/pre-compact-flush.py"
+            "command": "uv run python .claude/hooks/pre-compact-flush.py"
           }
         ]
       }
@@ -27,7 +27,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": ".claude/hooks/session-end-flush.py"
+            "command": "uv run python .claude/hooks/session-end-flush.py"
           }
         ]
       }

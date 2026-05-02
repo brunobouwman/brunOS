@@ -1,0 +1,33 @@
+[project]
+name = "brunos"
+version = "0.1.0"
+description = "Bruno's Second Brain — Claude Agent SDK process backed by an Obsidian vault"
+requires-python = ">=3.13,<3.14"
+dependencies = [
+    # Foundation (Phases 2, 6, 7)
+    "claude-agent-sdk>=0.1,<0.2",
+    "python-dotenv>=1.0,<2",
+    # Vector / RAG (Phase 3)
+    "fastembed>=0.8,<0.9",
+    "sqlite-vec>=0.1.6,<0.2",
+    "numpy>=1.26,<3",
+    # Slack (Phase 4.1)
+    "slack_sdk>=3.27,<4",
+    "slack_bolt>=1.20,<2",
+    # GitHub (Phase 4.2)
+    "PyGithub>=2.3,<3",
+    # Google: Gmail + Calendar (Phase 4.4)
+    "google-api-python-client>=2.130,<3",
+    "google-auth-oauthlib>=1.2,<2",
+    "google-auth-httplib2>=0.2,<0.3",
+    # HTTP / RSS (Phase 4 + 4.5)
+    "requests>=2.31,<3",
+    "feedparser>=6.0,<7",
+]
+
+[project.optional-dependencies]
+# VPS only: Postgres + pgvector. Installed separately in Phase 9 deploy.
+vps = ["psycopg[binary]>=3.2,<4"]
+
+[tool.uv]
+package = false

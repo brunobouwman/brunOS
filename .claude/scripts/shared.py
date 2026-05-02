@@ -222,10 +222,30 @@ def with_retry(
         raise last_exc
 
 
-def dispatch_flush(stdin_data: dict, source: str) -> Path | None:
-    """Persist transcript JSON and Popen memory_flush.py detached.
+_UV_FALLBACK_PATHS = (
+    Path.home() / ".local" / "bin" / "uv",
+    Path("/opt/homebrew/bin/uv"),
+    Path("/usr/local/bin/uv"),
+)
 
-    Returns the transcript path on success; None if no session_id or write failed.
+
+def _resolve_uv() -> str | None:
+    import shutil
+
+    found = shutil.which("uv")
+    if found:
+        return found
+    for p in _UV_FALLBACK_PATHS:
+        if p.exists():
+            return str(p)
+    return None
+
+
+def dispatch_flush(stdin_data: dict, source: str) -> Path | None:
+    """Persist transcript JSON and Popen memory_flush.py detached via `uv run`.
+
+    Falls back to .venv/bin/python or sys.executable if uv is not on PATH.
+    Returns the transcript path on success; None if write failed.
     """
     import subprocess
     import sys
@@ -242,12 +262,20 @@ def dispatch_flush(stdin_data: dict, source: str) -> Path | None:
         return None
 
     flush_script = REPO_ROOT / ".claude" / "scripts" / "memory_flush.py"
-    venv_python = REPO_ROOT / ".venv" / "bin" / "python"
-    python_bin = str(venv_python) if venv_python.exists() else sys.executable
+    uv_bin = _resolve_uv()
+    if uv_bin:
+        cmd = [
+            uv_bin, "run", "--project", str(REPO_ROOT),
+            "python", str(flush_script), str(transcript_path),
+        ]
+    else:
+        venv_python = REPO_ROOT / ".venv" / "bin" / "python"
+        python_bin = str(venv_python) if venv_python.exists() else sys.executable
+        cmd = [python_bin, str(flush_script), str(transcript_path)]
 
     try:
         subprocess.Popen(
-            [python_bin, str(flush_script), str(transcript_path)],
+            cmd,
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
             stdin=subprocess.DEVNULL,

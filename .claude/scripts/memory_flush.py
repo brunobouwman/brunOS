@@ -1,18 +1,24 @@
 #!/usr/bin/env python3
 """Transcript consolidator. Spawned detached by PreCompact and SessionEnd hooks.
 
+Receives a "kickoff" file containing the hook stdin metadata (session_id,
+transcript_path, reason, ...). The actual conversation lives at
+kickoff["transcript_path"] — Claude Code's session JSONL — and is loaded
+separately. The 2KB size filter applies to that real transcript, not the
+kickoff metadata.
+
 CLAUDE_INVOKED_BY MUST be set before importing claude_agent_sdk to keep the
 hooks short-circuiting when this script's own session emits SessionEnd. Set
 it as the very first executable statement.
 
 Skips:
-  - transcript path missing
-  - transcript <2KB (interactive sessions don't justify a Sonnet call)
+  - kickoff missing or unparseable
+  - referenced transcript missing or <2KB (interactive sessions don't justify a Sonnet call)
   - dedup hit (same session_id flushed within 60s)
   - empty SDK output or exactly "FLUSH_OK"
 
 On success: appends `## Memory flush (HH:MM)` + bullets to today's daily log,
-then unlinks the transcript.
+then unlinks the kickoff.
 """
 
 from __future__ import annotations
@@ -115,7 +121,8 @@ async def _consolidate(transcript_text: str) -> str:
     return "".join(parts).strip()
 
 
-def _load_transcript(path: Path) -> str | None:
+def _load_kickoff(path: Path) -> dict | None:
+    """Read the small handoff file written by dispatch_flush — hook stdin metadata."""
     try:
         raw = path.read_text(encoding="utf-8")
     except OSError:
@@ -124,59 +131,65 @@ def _load_transcript(path: Path) -> str | None:
         data = json.loads(raw)
     except json.JSONDecodeError:
         return None
-    return json.dumps(data, ensure_ascii=False)
+    return data if isinstance(data, dict) else None
+
+
+def _load_session_transcript(transcript_ref: str) -> str | None:
+    """Read the actual Claude Code session JSONL referenced by the kickoff."""
+    p = Path(transcript_ref)
+    if not p.exists():
+        return None
+    try:
+        return p.read_text(encoding="utf-8")
+    except OSError:
+        return None
+
+
+def _unlink(path: Path) -> None:
+    try:
+        path.unlink()
+    except OSError:
+        pass
 
 
 def main(argv: list[str]) -> int:
     if len(argv) < 2:
         return 0
-    transcript_path = Path(argv[1])
-    if not transcript_path.exists():
+    kickoff_path = Path(argv[1])
+    if not kickoff_path.exists():
         return 0
 
-    try:
-        size = transcript_path.stat().st_size
-    except OSError:
-        return 0
-    if size < MIN_TRANSCRIPT_BYTES:
-        try:
-            transcript_path.unlink()
-        except OSError:
-            pass
+    kickoff = _load_kickoff(kickoff_path)
+    if kickoff is None:
+        _unlink(kickoff_path)
         return 0
 
-    payload_text = _load_transcript(transcript_path)
-    if payload_text is None:
-        return 0
-
-    try:
-        meta = json.loads(payload_text)
-    except json.JSONDecodeError:
-        meta = {}
-    session_id = (meta.get("session_id") if isinstance(meta, dict) else None) or "unknown"
+    session_id = kickoff.get("session_id") or "unknown"
 
     if _within_dedup_window(session_id):
-        try:
-            transcript_path.unlink()
-        except OSError:
-            pass
+        _unlink(kickoff_path)
         return 0
 
-    if len(payload_text) > MAX_INPUT_CHARS:
-        payload_text = payload_text[-MAX_INPUT_CHARS:]
+    transcript_ref = kickoff.get("transcript_path")
+    transcript_text = (
+        _load_session_transcript(transcript_ref) if transcript_ref else None
+    )
+    if transcript_text is None or len(transcript_text) < MIN_TRANSCRIPT_BYTES:
+        _unlink(kickoff_path)
+        return 0
+
+    if len(transcript_text) > MAX_INPUT_CHARS:
+        transcript_text = transcript_text[-MAX_INPUT_CHARS:]
 
     try:
-        output = asyncio.run(_consolidate(payload_text))
+        output = asyncio.run(_consolidate(transcript_text))
     except Exception as e:
         sys.stderr.write(f"memory_flush: SDK call failed: {type(e).__name__}: {e}\n")
         return 0
 
     if not output or output.strip() == "FLUSH_OK":
         _record_flush(session_id)
-        try:
-            transcript_path.unlink()
-        except OSError:
-            pass
+        _unlink(kickoff_path)
         return 0
 
     header = f"## Memory flush ({now_brt().strftime('%H:%M')})"
@@ -188,10 +201,7 @@ def main(argv: list[str]) -> int:
         return 0
 
     _record_flush(session_id)
-    try:
-        transcript_path.unlink()
-    except OSError:
-        pass
+    _unlink(kickoff_path)
     return 0
 
 

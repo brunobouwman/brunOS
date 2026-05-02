@@ -72,15 +72,18 @@ Every `ClaudeAgentOptions(...)` call MUST pass `setting_sources` explicitly (`No
 ## Build commands
 
 ```bash
-python3 -m venv .venv && source .venv/bin/activate && pip install -r requirements.txt
+# Install / sync deps (uv reads pyproject.toml + uv.lock; recreates .venv as needed):
+uv sync
 
 # Manually consolidate a transcript into today's daily log (Phase 2):
-python .claude/scripts/memory_flush.py <transcript-path>
+uv run python .claude/scripts/memory_flush.py <transcript-path>
 
 # Index / search BrunOS/Memory/ (Phase 3):
-python .claude/scripts/memory_index.py [--full] [--paths file1.md file2.md] [--dry-run]
-python .claude/scripts/memory_search.py "<query>" [--k 10] [--path-prefix drafts/sent]
+uv run python .claude/scripts/memory_index.py [--full] [--paths file1.md file2.md] [--dry-run]
+uv run python .claude/scripts/memory_search.py "<query>" [--k 10] [--path-prefix drafts/sent]
 ```
+
+Hooks in `.claude/settings.json` invoke scripts via `uv run python ...` so they pick up the project's `.venv` regardless of cwd or whether the venv is activated.
 
 ## Memory search (Phase 3)
 
