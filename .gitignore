@@ -1,0 +1,34 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.egg-info/
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+
+# Virtualenv
+.venv/
+venv/
+
+# Env / secrets
+.env
+.env.local
+.env.*.local
+
+# Runtime data (per-machine state, never commit)
+.claude/data/
+.claude/scheduled_tasks.lock
+
+# Vault (BrunOS/) is its own concern.
+# Phase 9 will run `cd BrunOS && git init` so the vault syncs Mac<->VPS as its own repo.
+# Until then, ignore from this (code) repo so it doesn't get half-tracked.
+# Vault-internal ignores (e.g. Memory/drafts/active/*) live in BrunOS/.gitignore (Phase 9).
+BrunOS/
+
+# OS / editors
+.DS_Store
+Thumbs.db
+*.swp
+.idea/
+.vscode/
