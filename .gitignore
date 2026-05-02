@@ -18,6 +18,7 @@ venv/
 
 # Runtime data (per-machine state, never commit)
 .claude/data/
+.claude/.env
 
 # Vault (BrunOS/) is its own concern.
 # Phase 9 will run `cd BrunOS && git init` so the vault syncs Mac<->VPS as its own repo.

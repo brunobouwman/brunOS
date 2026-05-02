@@ -56,17 +56,33 @@ def _parse_dotenv(path: Path) -> dict[str, str]:
     return out
 
 
+DOTENV_PATH = REPO_ROOT / ".claude" / ".env"
+
+
+def load_env() -> None:
+    """Load `.claude/.env` into os.environ via python-dotenv (override=False).
+
+    Lazy import — hooks running on system python (no .venv) skip this and read
+    from stdin instead, so they don't pay the import cost.
+    """
+    try:
+        from dotenv import load_dotenv
+    except ImportError:
+        return
+    load_dotenv(DOTENV_PATH, override=False)
+
+
 @lru_cache(maxsize=1)
 def vault_path() -> Path:
-    """Resolve BRUNOS_VAULT_PATH from env or .env. Raise if unset."""
+    """Resolve BRUNOS_VAULT_PATH from env or .claude/.env. Raise if unset."""
     val = os.environ.get("BRUNOS_VAULT_PATH")
     if not val:
-        env = _parse_dotenv(REPO_ROOT / ".env")
+        env = _parse_dotenv(DOTENV_PATH)
         val = env.get("BRUNOS_VAULT_PATH")
     if not val:
         raise RuntimeError(
-            "BRUNOS_VAULT_PATH not set in environment or .env "
-            f"(checked {REPO_ROOT / '.env'})"
+            "BRUNOS_VAULT_PATH not set in environment or .claude/.env "
+            f"(checked {DOTENV_PATH})"
         )
     return Path(val).expanduser().resolve()
 
