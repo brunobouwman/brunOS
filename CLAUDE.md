@@ -115,6 +115,14 @@ uv run python .claude/scripts/bootstrap_google_oauth.py
 # Run skills (Phase 5):
 uv run python .claude/skills/news-digest/scripts/digest.py [--dry-run] [--max-items N]
 uv run python .claude/skills/weekly-review/scripts/aggregate_week.py [--week YYYY-Www] [--dry-run] [--force]
+
+# Heartbeat + reflection (Phase 6) — manual CLI; Phase 9 wires the scheduler:
+uv run python .claude/scripts/heartbeat.py [--dry-run] [--no-agent] [--force]
+uv run python .claude/scripts/memory_reflect.py [--dry-run]
+
+# Phase 7 — Slack chat bot:
+uv run python .claude/chat/bot.py --smoke-test     # connect + auth.test, exit 0
+uv run python .claude/chat/bot.py                  # foreground daemon (Ctrl+C to stop)
 ```
 
 Hooks in `.claude/settings.json` invoke scripts via `uv run python ...` so they pick up the project's `.venv` regardless of cwd or whether the venv is activated.
@@ -149,6 +157,53 @@ Anthropic-style skills under `.claude/skills/`. Discovery is via SKILL.md frontm
 
 Both scripts set `CLAUDE_INVOKED_BY` before importing `claude_agent_sdk` (recursion-safe) and pass `setting_sources=None` on every `ClaudeAgentOptions(...)` (deterministic + cheap child calls). Both write external content with `# TODO(Phase 8): wrap in <external_data>` comments at prompt-construction sites for the upcoming sanitizer retrofit. Phase 9 schedules them via launchd / systemd; Phase 5 ships only standalone CLIs.
 
+## Heartbeat + Reflection (Phase 6)
+
+Two manually-runnable proactive scripts. Phase 9 wires launchd / systemd schedules.
+
+### `heartbeat.py` (every 30 min during 08:00–22:00 BRT in Phase 9)
+
+5-stage flow:
+1. Re-index vault (subprocess `memory_index.py`).
+2. Gather Slack/GitHub/ClickUp/Gmail/Calendar/RSS in parallel via `asyncio.gather` (each integration call wrapped in `asyncio.to_thread`; `return_exceptions=True` so one failure doesn't abort the tick).
+3. Build snapshot (`heartbeat_snapshot.build_snapshot`); diff against previous (`heartbeat_snapshot.diff_snapshot`); persist current snapshot to `.claude/data/state/heartbeat-state.json` BEFORE the agent runs (a crash-during-agent doesn't replay the same delta on next tick).
+4. Drafts hygiene (`drafts.expire_old_drafts` — moves >24h-old drafts to `drafts/expired/`; `drafts.capture_sent_replies` is a Phase 6.5 stub) + habits prep (`habits.reset_for_today_if_needed` archives yesterday's "## Today" to "## History" and rebuilds a fresh checklist; `habits.detect_signals` computes per-pillar booleans from the snapshot diff).
+5. If delta is empty AND no habits-reset AND no drafts expired → fast-path: append a one-line tick to today's daily log + `_notify` "no changes" + exit. Otherwise: build sanitized `delta_text` (every external payload through `sanitize.wrap_external`) → Haiku 4.5 guardrail (`allowed_tools=[]`, `setting_sources=None`, `max_turns=1`, default-deny on parse failure) → on `pass`/`suspicious`, Sonnet 4.6 main agent (`allowed_tools=["Read","Write","Edit","Bash"]`, `setting_sources=["project"]`, `max_turns=15`) → osascript notify.
+
+The main agent's tools include Bash but the system prompt forbids invoking `query.py slack send` or any external curl. Phase 8's `dangerous-bash.py` hardens this; Phase 6 ships honor-system + tools-whitelist.
+
+CLI flags: `--dry-run` (print stages + would-be agent prompt; skip SDK calls + vault writes + notify); `--no-agent` (run deterministic stages, skip SDK calls); `--force` (bypass empty-delta fast-path).
+
+### `memory_reflect.py` (daily 08:00 BRT in Phase 9, before heartbeat)
+
+Single Sonnet 4.6 call (`allowed_tools=[]`, `setting_sources=None`, `max_turns=1`). Reads yesterday's daily log + current MEMORY.md; emits JSON of `[{type, text, promote}]` per item; deterministic Python applies promotions to the right MEMORY.md section (decision → "Key durable decisions", lesson → "Lessons", fact → "Tax & financial structure", status → "Active projects"). If MEMORY.md > 5KB after append, a SECOND Sonnet call compacts older entries first (aborts apply if shrink > 50%). SOUL.md changes go to today's daily log under "## SUGGESTED SOUL CHANGES (REVIEW MANUALLY)" — never directly written. Idempotent via `.claude/data/state/last_reflection.json`.
+
+`protect-soul.py` (PreToolUse `Edit|Write`) is belt-and-suspenders: it blocks `BrunOS/Memory/SOUL.md` edits when `CLAUDE_INVOKED_BY=reflection`. Reflection itself uses no tools, so the hook is defensive against future agent surfaces.
+
+`CLAUDE_INVOKED_BY` values introduced in this phase: `heartbeat`, `reflection`. Each script sets it BEFORE importing `claude_agent_sdk` (recursion-safe).
+
+`sanitize.py` ships with `wrap_external` + `TRUST_BOUNDARY_INSTRUCTION` only. Phase 8 expands with regex pattern detection + markdown escaping.
+
+### Drafts + habits
+
+`drafts.py` handles deterministic lifecycle: `expire_old_drafts(now)` moves >24h-old drafts from `drafts/active/` to `drafts/expired/` (flips `status: expired`). `capture_sent_replies` is a Phase 6.5 stub. Voice corpus retrieval uses `memory_search.py --path-prefix drafts/sent`. Filename: `YYYY-MM-DD_<source>_<recipient-slug>_<short-hash>.md` — same `(source, source_id)` always hashes to the same filename so the same item never produces two drafts.
+
+`habits.py` handles the 08:00 BRT reset (deterministic — archive yesterday's "Today" to History, create fresh checklist) + signal detection (per-pillar boolean from snapshot deltas). The HEARTBEAT AGENT applies HABITS.md check-marks via the Edit tool — `habits.py` only computes signals.
+
+## Slack chat bot (Phase 7)
+
+Long-running daemon at `.claude/chat/bot.py` that turns Bruno's personal Slack workspace into a remote chat surface for BrunOS. Connects via Socket Mode (`AsyncApp` + `AsyncSocketModeHandler` from `slack_bolt`), listens for `message.im` events, and routes each Slack thread to a stateful `ClaudeSDKClient` keyed on the thread root `ts`. Replies post in-thread via Bolt's `say()`.
+
+- **Entry**: `uv run python .claude/chat/bot.py` (foreground); `--smoke-test` validates the bot token + prints `bot_user_id` and exits 0.
+- **Recursion guard**: `CLAUDE_INVOKED_BY=chat` is set BEFORE any SDK import (skips SessionEnd flush + PreCompact hooks for child sessions).
+- **Tools / setting_sources**: every options block uses `allowed_tools=["Read","Write","Edit","Bash"]` and `setting_sources=["project"]` so each session loads `CLAUDE.md` + the four Phase 5 skills (`brunos-vault`, `memory-search`, `news-digest`, `weekly-review`). The Bash tool lets the bot shell out to `query.py` (Phase 4 dispatcher) and `memory_search.py` (Phase 3) — no integration logic is duplicated in the bot.
+- **System prompt**: built ONCE at startup via `chat.system_prompt.build_chat_system_prompt()` — composes a chat-mode preamble (Slack mrkdwn rules, carve-out reminder) plus the canonical vault block (`hooks.session-start-context.build_context()` reused via `importlib`). Vault edits during the daemon's run aren't reflected until restart — acceptable trade-off vs ~6 file reads per message.
+- **Slack send carve-out**: this is the **only** autonomous-send surface in BrunOS. SOUL.md prohibits sending elsewhere (email, GitHub/ClickUp comments, X, etc. all stay draft-only).
+- **Slack app config (one-time)**: bot token needs `chat:write` (reinstall the app after adding); Event Subscriptions enabled with **only** `message.im` under Bot Events; Socket Mode enabled with an App-Level Token (`xapp-...`) holding `connections:write`. Documented in `.claude/.env.example`.
+- **State**: `bot_user_id` is merged into `.claude/data/state/slack-state.json` (shared with Phase 4 — channels map untouched). Per-thread index lives in `.claude/data/state/chat.db` (SQLite, `chat_threads(thread_key, created_at, last_message_at)`).
+- **Shutdown**: SIGINT/SIGTERM trigger `session_manager.close_all()` + `handler.close_async()` so all SDK sessions disconnect cleanly. Daemon restart starts each thread fresh (MVP: no replay-on-resume).
+- **Phase 6/7 boundary**: chat bot owns DMs (Socket Mode push, `channel_type=im`); Phase 6 heartbeat owns non-DM @mentions (polling `slack.mentions_since_last_run`). Once Phase 6 is live it must filter out IM channels to avoid double-replies.
+
 ## Phase status
 
 - [x] Phase 0 — Foundation prep (2026-05-02)
@@ -157,8 +212,8 @@ Both scripts set `CLAUDE_INVOKED_BY` before importing `claude_agent_sdk` (recurs
 - [x] Phase 3 — Memory search (hybrid RAG) (2026-05-02)
 - [x] Phase 4 — Integrations (Slack → GitHub → ClickUp → Gmail/Calendar → RSS) (2026-05-02)
 - [x] Phase 5 — Skills (`brunos-vault`, `memory-search`, `news-digest`, `weekly-review`) (2026-05-02)
-- [ ] Phase 6 — Heartbeat + Reflection + Drafts + Habits
-- [ ] Phase 7 — Slack chat bot (optional)
+- [x] Phase 6 — Heartbeat + Reflection + Drafts + Habits (2026-05-03)
+- [x] Phase 7 — Slack chat bot (2026-05-03)
 - [ ] Phase 8 — Security hardening (4 layers)
 - [ ] Phase 9 — Deployment (Mac launchd + VPS systemd + vault git-sync)
 
