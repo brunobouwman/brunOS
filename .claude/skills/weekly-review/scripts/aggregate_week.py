@@ -37,6 +37,7 @@ from shared import (  # noqa: E402
     vault_path,
     _ts_brt,
 )
+from sanitize import wrap_external  # noqa: E402
 
 load_env()
 
@@ -325,17 +326,15 @@ def _is_refined(existing_text: str) -> bool:
 
 
 def _build_bundle(start_dt: datetime, end_dt: datetime, year: int, week: int) -> str:
-    # TODO(Phase 8): wrap each external section in <external_data> via sanitize.py.
-    # ClickUp/GitHub/Calendar payloads are third-party content and a prompt-injection vector.
     header = (
         f"# Weekly review bundle — {year}-W{week:02d}\n"
         f"Window: {start_dt.isoformat()} → {end_dt.isoformat()}\n"
     )
     sections = [
         header,
-        _gather_clickup(),
-        _gather_github(),
-        _gather_calendar(start_dt, end_dt),
+        wrap_external(_gather_clickup(), "clickup"),
+        wrap_external(_gather_github(), "github"),
+        wrap_external(_gather_calendar(start_dt, end_dt), "calendar"),
         _gather_goals(),
         _gather_daily_themes(start_dt, end_dt),
     ]

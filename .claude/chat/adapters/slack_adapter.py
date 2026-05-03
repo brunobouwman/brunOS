@@ -27,6 +27,7 @@ REPO_ROOT = Path(__file__).resolve().parents[3]
 sys.path.insert(0, str(REPO_ROOT / ".claude" / "scripts"))
 
 from chat.session_manager import SessionManager  # noqa: E402
+from sanitize import wrap_external  # noqa: E402
 
 
 def _log(msg: str) -> None:
@@ -156,14 +157,19 @@ def register(app, bot_user_id: str, session_manager: SessionManager) -> None:
     async def _on_message(event, say, logger) -> None:  # noqa: ARG001
         if not _should_handle_dm(event, bot_user_id):
             return
-        # TODO(Phase 8): wrap user-facing text in <external_data> via sanitize.py.
-        await _route(event, say, event["text"], surface="dm")
+        wrapped = wrap_external(
+            event["text"],
+            "slack",
+            channel=event.get("channel", ""),
+            user=event.get("user", ""),
+            surface="dm",
+        )
+        await _route(event, say, wrapped, surface="dm")
 
     @app.event("app_mention")
     async def _on_app_mention(event, say, logger) -> None:  # noqa: ARG001
         if not _should_handle_mention(event, bot_user_id):
             return
-        # TODO(Phase 8): wrap user-facing text in <external_data> via sanitize.py.
         user_text = _strip_bot_mention(event["text"], bot_user_id)
         if not user_text:
             slack_thread_ts = _derive_slack_thread_ts(event)
@@ -172,4 +178,11 @@ def register(app, bot_user_id: str, session_manager: SessionManager) -> None:
                 thread_ts=slack_thread_ts,
             )
             return
-        await _route(event, say, user_text, surface="mention")
+        wrapped = wrap_external(
+            user_text,
+            "slack",
+            channel=event.get("channel", ""),
+            user=event.get("user", ""),
+            surface="mention",
+        )
+        await _route(event, say, wrapped, surface="mention")

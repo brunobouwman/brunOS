@@ -292,11 +292,7 @@ def _delta_summary(delta: dict) -> dict[str, int]:
 
 
 def _build_delta_text(delta: dict, gathered: dict) -> str:
-    """Render the diff into the agent prompt — every external-content payload wrapped.
-
-    # TODO(Phase 8): wrap delta in <external_data> via sanitize.py — Phase 8
-    # adds regex pattern detection + markdown escaping. Phase 6 ships the wrap.
-    """
+    """Render the diff into the agent prompt — every external-content payload wrapped."""
     sections: list[str] = []
     summary = _delta_summary(delta)
     sections.append("## Delta summary\n")

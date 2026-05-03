@@ -155,7 +155,7 @@ Anthropic-style skills under `.claude/skills/`. Discovery is via SKILL.md frontm
 - `news-digest` — daily AI-news digest. Pulls `integrations.rss.new_items()`, dedupes via `memory_search.py --path-prefix news-digest`, scores with Haiku 4.5 (`claude-haiku-4-5-20251001`) using `references/scoring-rubric.md`, clusters survivors with Sonnet 4.6 (`claude-sonnet-4-6`) → `Memory/news-digest/YYYY-MM-DD.md`. Idempotent (overwrites on same day). Slow-news placeholder when fewer than 3 items survive.
 - `weekly-review` — Sunday-evening review DRAFT. Bundles `clickup.{overdue,due_today}` + `github.{recent_commits(days=7),open_prs,assigned_to_me}` + `calendar.week()` + daily-log themes (subprocess `memory_search.py --path-prefix daily`) + active-goals files; single Opus 4.7 call (`claude-opus-4-7`) using `references/review-template.md` as system prompt → `Memory/goals/YYYY-Www-review.md`. Refined-protection: aborts unless `--force` if first non-frontmatter line ≠ `_Draft for review — refine before Monday._`. ClickUp completion-history isn't yet exposed by `integrations.clickup`; "what got done" leans on GitHub commits + daily-log themes.
 
-Both scripts set `CLAUDE_INVOKED_BY` before importing `claude_agent_sdk` (recursion-safe) and pass `setting_sources=None` on every `ClaudeAgentOptions(...)` (deterministic + cheap child calls). Both write external content with `# TODO(Phase 8): wrap in <external_data>` comments at prompt-construction sites for the upcoming sanitizer retrofit. Phase 9 schedules them via launchd / systemd; Phase 5 ships only standalone CLIs.
+Both scripts set `CLAUDE_INVOKED_BY` before importing `claude_agent_sdk` (recursion-safe) and pass `setting_sources=None` on every `ClaudeAgentOptions(...)` (deterministic + cheap child calls). External RSS / ClickUp / GitHub / Calendar content is wrapped with `sanitize.wrap_external` before entering prompts. Phase 9 schedules them via launchd / systemd; Phase 5 ships only standalone CLIs.
 
 ## Heartbeat + Reflection (Phase 6)
 
@@ -182,7 +182,7 @@ Single Sonnet 4.6 call (`allowed_tools=[]`, `setting_sources=None`, `max_turns=1
 
 `CLAUDE_INVOKED_BY` values introduced in this phase: `heartbeat`, `reflection`. Each script sets it BEFORE importing `claude_agent_sdk` (recursion-safe).
 
-`sanitize.py` ships with `wrap_external` + `TRUST_BOUNDARY_INSTRUCTION` only. Phase 8 expands with regex pattern detection + markdown escaping.
+`sanitize.py` provides `wrap_external`, `clean_external`, `TRUST_BOUNDARY_INSTRUCTION`, regex injection-marker stripping, base64 blob redaction, and markdown/XML escaping outside fenced code blocks.
 
 ### Drafts + habits
 
@@ -209,6 +209,17 @@ Long-running daemon at `.claude/chat/bot.py` that turns Bruno's personal Slack w
 - **Shutdown**: SIGINT/SIGTERM trigger `session_manager.close_all()` + `handler.close_async()` so all SDK sessions disconnect cleanly. Daemon restart starts each thread fresh (MVP: no replay-on-resume).
 - **Phase 6/7 boundary**: chat bot owns DMs + channel @mentions in real-time (Socket Mode push). `heartbeat._gather()` calls `_split_chat_bot_handled()` after `slack.since_last_run()`: drops messages with `<@bot_uid>` (chat bot's `app_mention` handler owns them) and drops DMs where `slack.get_thread()` shows a bot reply with `ts > message.ts`. Unreplied DMs stay actionable — that's the catch-up safety net for Phase 7 downtime. Snapshot + daily-log counts use `slack_msgs_all` (raw haul) so reflection still sees full activity, even DMs the bot handled. Tick entry format: `Slack: <total> new (<handled by chat bot>, <need attention>)`.
 
+## Security (Phase 8)
+
+Four independent layers guard the long-running agent surfaces:
+
+1. **Credential protection** — `.claude/hooks/block-secrets.py` runs as a PreToolUse hook before file reads/writes/searches and Bash. It blocks credential/private paths (`.env*`, keys, OAuth tokens, `.ssh/`, `.aws/`, `secrets/`, `private/`) and finance/invoice/billing/payment files, plus Bash env-exfil commands like `cat .env`, `printenv`, `env`, `os.environ`, and `process.env`.
+2. **Sanitization** — `.claude/scripts/sanitize.py` is the data-boundary source of truth. `wrap_external` strips injection markers via `_INJECTION_PATTERNS`, redacts large base64-looking blobs, escapes XML/markdown control characters outside fenced code, escapes tag attributes, then wraps third-party content in `<external_data ...>`.
+3. **Semantic guardrail** — `heartbeat.py` runs the Haiku 4.5 pre-flight check before the main heartbeat agent (`allowed_tools=[]`, `setting_sources=None`, `max_turns=1`). Verdict parse failures default to `fail`.
+4. **Command guardrails** — `.claude/hooks/dangerous-bash.py` runs as a Bash-only PreToolUse hook. Patterns live in `DANGEROUS_BASH_PATTERNS` inside `.claude/scripts/shared.py` and cover destructive filesystem commands, privilege escalation, outbound curl/wget/netcat-style exfil, package installs, destructive git commands, and process/system kills.
+
+Hook order in `.claude/settings.json`: `block-secrets.py` first, `dangerous-bash.py` second, `protect-soul.py` last. Hook input is JSON on stdin. `block-secrets.py` and `protect-soul.py` soft-block with `{"decision":"block","reason":"..."}` on stdout; `dangerous-bash.py` hard-blocks with exit 2 and stderr.
+
 ## Phase status
 
 - [x] Phase 0 — Foundation prep (2026-05-02)
@@ -219,7 +230,7 @@ Long-running daemon at `.claude/chat/bot.py` that turns Bruno's personal Slack w
 - [x] Phase 5 — Skills (`brunos-vault`, `memory-search`, `news-digest`, `weekly-review`) (2026-05-02)
 - [x] Phase 6 — Heartbeat + Reflection + Drafts + Habits (2026-05-03)
 - [x] Phase 7 — Slack chat bot (2026-05-03)
-- [ ] Phase 8 — Security hardening (4 layers)
+- [x] Phase 8 — Security hardening (4 layers) (2026-05-03)
 - [ ] Phase 9 — Deployment (Mac launchd + VPS systemd + vault git-sync)
 
 ## Reference

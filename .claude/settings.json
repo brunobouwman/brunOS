@@ -13,6 +13,24 @@
     ],
     "PreToolUse": [
       {
+        "matcher": "Read|Bash|Grep|Edit|Write|Glob|MultiEdit",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "uv run python .claude/hooks/block-secrets.py"
+          }
+        ]
+      },
+      {
+        "matcher": "Bash",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "uv run python .claude/hooks/dangerous-bash.py"
+          }
+        ]
+      },
+      {
         "matcher": "Edit|Write",
         "hooks": [
           {

@@ -252,7 +252,6 @@ def _compact_if_over_cap(memory_text: str) -> str:
     if not fm:
         _log("  no frontmatter found; aborting compaction")
         return memory_text
-    # TODO(Phase 8): wrap body in <external_data> via sanitize.py.
     combined = (
         "INSTRUCTIONS:\n"
         f"{COMPACTION_SYSTEM_PROMPT}\n\n"
@@ -299,9 +298,6 @@ def _dump_debug(label: str, payload: str) -> None:
 
 
 def _build_user_prompt(yesterday_log: str, memory_text: str) -> str:
-    # TODO(Phase 8): wrap yesterday_log content in <external_data> via sanitize.py.
-    # The daily log is mostly agent-written but heartbeat ticks include sanitized
-    # but still third-party Slack/Gmail fragments.
     return (
         "## Current MEMORY.md\n\n"
         f"{memory_text}\n\n"

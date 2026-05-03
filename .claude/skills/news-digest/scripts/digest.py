@@ -34,6 +34,7 @@ from shared import atomic_write, load_env, now_brt, vault_path, _ts_brt  # noqa:
 load_env()
 
 from integrations.rss import FeedItem, new_items  # noqa: E402
+from sanitize import wrap_external  # noqa: E402
 
 SCRIPT_DIR = Path(__file__).resolve().parent
 RUBRIC_PATH = SCRIPT_DIR.parent / "references" / "scoring-rubric.md"
@@ -136,16 +137,22 @@ def _build_scoring_prompt(items: list[FeedItem], rubric: str) -> tuple[str, str]
         "Each element: {\"id\": <int index>, \"score\": <0-10 int>, \"reason\": <short str>}.\n\n"
         "Use this rubric:\n\n" + rubric
     )
-    # TODO(Phase 8): wrap each item in <external_data> tags via sanitize.py
-    # RSS bodies are third-party content and a known prompt-injection vector.
     lines = ["Score each item below. Return ONE JSON array, in input order.\n"]
     for idx, item in enumerate(items):
         summary = re.sub(r"\s+", " ", item.summary).strip()[:600]
-        lines.append(f"--- item {idx} ---")
-        lines.append(f"title: {item.title}")
-        lines.append(f"feed: {item.feed_url}")
+        content = [f"title: {item.title}", f"feed: {item.feed_url}"]
         if summary:
-            lines.append(f"summary: {summary}")
+            content.append(f"summary: {summary}")
+        lines.append(f"--- item {idx} ---")
+        lines.append(
+            wrap_external(
+                "\n".join(content),
+                "rss",
+                id=str(idx),
+                feed=item.feed_url,
+                title=item.title[:80],
+            )
+        )
         lines.append("")
     user = "\n".join(lines)
     return system, user
@@ -193,17 +200,28 @@ def _build_summary_prompt(items: list[FeedItem], scores_by_id: dict[int, dict]) 
         "Skip themes with weak signal rather than padding. Output markdown only — "
         "no preamble, no closing remark."
     )
-    # TODO(Phase 8): wrap each item summary in <external_data> via sanitize.py.
     lines = ["Items to cluster + summarize (already filtered for relevance):\n"]
     for idx, item in enumerate(items):
         meta = scores_by_id.get(idx, {})
         score = meta.get("score", "?")
         summary = re.sub(r"\s+", " ", item.summary).strip()[:600]
-        lines.append(f"--- item {idx} (score {score}) ---")
-        lines.append(f"title: {item.title}")
-        lines.append(f"link: {item.link}")
+        content = [
+            f"title: {item.title}",
+            f"link: {item.link}",
+            f"score: {score}",
+        ]
         if summary:
-            lines.append(f"summary: {summary}")
+            content.append(f"summary: {summary}")
+        lines.append(f"--- item {idx} (score {score}) ---")
+        lines.append(
+            wrap_external(
+                "\n".join(content),
+                "rss",
+                id=str(idx),
+                feed=item.feed_url,
+                title=item.title[:80],
+            )
+        )
         lines.append("")
     return system, "\n".join(lines)
 

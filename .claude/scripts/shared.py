@@ -22,7 +22,58 @@ STATE_DIR = REPO_ROOT / ".claude" / "data" / "state"
 LOCK_DIR = STATE_DIR / "locks"
 BRT = ZoneInfo("America/Sao_Paulo")
 
-DANGEROUS_BASH_PATTERNS: list[str] = []
+DANGEROUS_BASH_PATTERNS: list[str] = [
+    # Destructive filesystem
+    r"\brm\s+(-[rRf]+\s+)*(/|\$HOME|~|\.|\*)\s*$",
+    r"\brm\s+-[rRf]+\s+(/|\$HOME|~)",
+    r"\bdd\s+if=",
+    r"\bmkfs(\.|\s)",
+    r":\(\)\s*\{\s*:\s*\|\s*:\s*&\s*\}\s*;\s*:",
+    r">\s*/dev/sd[a-z]",
+    r"\bchmod\s+-R\s+777\s+/",
+    r"\bfind\s+/\s+.*-delete",
+    r"\bshred\b",
+    # Privilege escalation
+    r"\bsudo\b",
+    r"\bsu\s+-",
+    r"\bchmod\s+777\b",
+    r"\bchown\s+root\b",
+    r"\bsetuid\b",
+    r"\bdoas\b",
+    # Outbound exfil
+    r"\bcurl\s+(-[a-zA-Z]+\s+)*https?://",
+    r"\bwget\s+.+\|\s*(sh|bash|zsh|python)",
+    r"\bcurl\s+.+\|\s*(sh|bash|zsh|python)",
+    r"\bnc\s+(-[a-zA-Z]+\s+)*-e\b",
+    r"bash\s+-i\s+>&\s+/dev/tcp/",
+    r"\b/dev/tcp/",
+    r"\bsocat\b",
+    # Package install
+    r"\bpip3?\s+install\b",
+    r"\buv\s+(pip\s+)?install\b",
+    r"\bnpm\s+(install|i)\b",
+    r"\byarn\s+add\b",
+    r"\bpnpm\s+(add|install|i)\b",
+    r"\bbrew\s+install\b",
+    r"\bapt(-get)?\s+install\b",
+    r"\bdnf\s+install\b",
+    # Git destructive
+    r"\bgit\s+push\s+(-[a-zA-Z]+\s+)*--force(-with-lease)?\s+.*\b(main|master)\b",
+    r"\bgit\s+push\s+(-[a-zA-Z]+\s+)*-f\s+.*\b(main|master)\b",
+    r"\bgit\s+reset\s+--hard\b",
+    r"\bgit\s+clean\s+-[fdx]+",
+    r"\bgit\s+branch\s+-D\b",
+    r"\bgit\s+checkout\s+\.",
+    r"\bgit\s+restore\s+\.",
+    r"--no-verify\b",
+    # Process kill / system
+    r"\bpkill\s+-f\b",
+    r"\bkillall\s+-9\b",
+    r"\bkill\s+-9\s+1\b",
+    r"\bshutdown\b",
+    r"\breboot\b",
+    r"\bhalt\b",
+]
 
 
 def _ts_brt(dt: datetime | None = None) -> str:

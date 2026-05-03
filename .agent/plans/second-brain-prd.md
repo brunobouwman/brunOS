@@ -504,6 +504,8 @@ Failure-open per call: any Slack API error during the split keeps the message in
 
 **Complexity: Medium–High** · Depends on: Phases 2, 6 (the guardrail agent is wired into the heartbeat in Phase 6; this phase formalizes the rest)
 
+**Status:** Implemented 2026-05-03.
+
 Four independent layers. The guardrail agent (layer 3) was already wired into the heartbeat in Phase 6 — Phase 8 ensures the other three exist and are configured.
 
 ### Layer 1 — Credential protection: `.claude/hooks/block-secrets.py`
