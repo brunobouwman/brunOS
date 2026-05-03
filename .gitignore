@@ -20,6 +20,11 @@ venv/
 .claude/data/
 .claude/.env
 
+# Local Codex app mirrors / context, not repo source of truth
+.agents/
+.codex/
+AGENTS.md
+
 # Vault (BrunOS/) is its own concern.
 # Phase 9 will run `cd BrunOS && git init` so the vault syncs Mac<->VPS as its own repo.
 # Until then, ignore from this (code) repo so it doesn't get half-tracked.
