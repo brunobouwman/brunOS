@@ -3,12 +3,21 @@
 
 Reads (in order): SOUL.md, USER.md, MEMORY.md, last 3 daily logs, HEARTBEAT.md, HABITS.md.
 Falls through to BOOTSTRAP.md if it exists.
+
+Skipped when CLAUDE_INVOKED_BY ∈ {reflection, news-digest, weekly-review,
+memory_flush} — those scripts compose their own minimal context and don't
+benefit from the full vault dump (and reflection in particular suffers from
+double-loading MEMORY.md when the hook fires on top of its already-included
+input). Heartbeat AGENT sessions DO want the context (loaded via
+setting_sources=["project"]) so we don't skip "heartbeat".
+
 Fails open: any unexpected exception writes to stderr and exits 0.
 """
 
 from __future__ import annotations
 
 import json
+import os
 import sys
 from pathlib import Path
 
@@ -66,7 +75,12 @@ def build_context() -> str:
     return "\n".join(parts)
 
 
+_SKIP_FOR = {"reflection", "guardrail", "news-digest", "weekly-review", "memory_flush"}
+
+
 def main() -> int:
+    if os.environ.get("CLAUDE_INVOKED_BY") in _SKIP_FOR:
+        return 0
     try:
         sys.stdin.read()
     except Exception:

@@ -79,16 +79,14 @@ Cap at 8 promoted items. If nothing meets the bar, output exactly:
 (no preamble, no explanation, no markdown)."""
 
 
-COMPACTION_SYSTEM_PROMPT = """You compact the body of BrunOS's MEMORY.md to fit under 4500 bytes while preserving:
-1. All section headings as-is (typically: Active projects, Active goals, Key durable decisions, Tax and financial structure, Lessons, Context links — or whatever sections currently exist).
-2. The most recent and most load-bearing entries in each section.
-
-Compact by:
-- Merging redundant bullets across sessions.
-- Tightening prose (no hedging, no padding) without losing dates or reversal triggers.
-- Dropping the OLDEST low-signal entries first.
-
-Output the new body as raw markdown only — no preamble, no fenced blocks, no explanation. Do not include YAML frontmatter; start directly with the first heading."""
+COMPACTION_SYSTEM_PROMPT = (
+    "Compact this MEMORY content to under 4500 bytes. Preserve all section headings as-is "
+    "and the most recent / most load-bearing entries in each section. Merge redundant bullets "
+    "across sessions. Tighten prose (no hedging, no padding) without losing dates or reversal "
+    "triggers. Drop the OLDEST low-signal entries first. Output raw markdown only — no preamble, "
+    "no fenced blocks, no explanation. Do not include YAML frontmatter; start directly with "
+    "the first heading."
+)
 
 
 SECTION_HEADERS = {
@@ -122,7 +120,7 @@ def _extract_text(msg) -> str:
     return "\n".join(chunks)
 
 
-async def _reason(prompt_text: str, *, system_prompt: str, max_turns: int = 1) -> str:
+async def _reason(prompt_text: str, *, system_prompt: str | None, max_turns: int = 1) -> str:
     from claude_agent_sdk import ClaudeAgentOptions, query
 
     options = ClaudeAgentOptions(
@@ -240,8 +238,12 @@ def _compact_if_over_cap(memory_text: str) -> str:
     """If memory_text > 5KB, run a Sonnet compaction call on the body only.
 
     Frontmatter is stripped before sending (the `claude` CLI subprocess treats
-    leading `---` as a delimiter and fails); re-attached after compaction.
-    Abort apply on shrink-too-far.
+    leading `---` as a delimiter); re-attached after compaction. The
+    instructions are embedded in the user message rather than passed via
+    `--system-prompt` — empirically the bundled CLI fails with exit 1 when a
+    long markdown body is paired with a long `--system-prompt` arg, even with
+    `setting_sources=None` and the SessionStart hook short-circuited. Abort
+    apply on shrink-too-far.
     """
     if len(memory_text.encode("utf-8")) <= MEMORY_HARD_CAP_BYTES:
         return memory_text
@@ -250,11 +252,15 @@ def _compact_if_over_cap(memory_text: str) -> str:
     if not fm:
         _log("  no frontmatter found; aborting compaction")
         return memory_text
+    # TODO(Phase 8): wrap body in <external_data> via sanitize.py.
+    combined = (
+        "INSTRUCTIONS:\n"
+        f"{COMPACTION_SYSTEM_PROMPT}\n\n"
+        "CONTENT TO COMPACT:\n"
+        f"{body}"
+    )
     try:
-        # TODO(Phase 8): wrap body in <external_data> via sanitize.py.
-        compacted_body = asyncio.run(
-            _reason(body, system_prompt=COMPACTION_SYSTEM_PROMPT)
-        )
+        compacted_body = asyncio.run(_reason(combined, system_prompt=None))
     except Exception as e:
         _log(f"  compaction call failed: {type(e).__name__}: {e}; keeping original")
         return memory_text
