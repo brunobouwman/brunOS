@@ -227,7 +227,7 @@ Files:
 
 `integrations/slack.py`:
 - **Two tokens**: `SLACK_BOT_TOKEN` (`xoxb-...`) for REST, `SLACK_APP_TOKEN` (`xapp-...` with `connections:write`) reserved for Phase 7 Socket Mode.
-- **Bot scopes** to request: `channels:history`, `groups:history`, `im:history`, `mpim:history`, `channels:read`, `groups:read`, `im:read`, `mpim:read`, `users:read`, `users:read.email`, `team:read`. Add `channels:join` if you want auto-join. **Skip** `chat:write` — Assistant mode drafts locally.
+- **Bot scopes** to request: `channels:history`, `groups:history`, `im:history`, `mpim:history`, `channels:read`, `groups:read`, `im:read`, `mpim:read`, `users:read`, `users:read.email`, `team:read`. Add `channels:join` if you want auto-join. Phase 4 itself doesn't need `chat:write` — Assistant mode drafts locally — but Phase 7 (chat bot) requires `chat:write` + `app_mentions:read` to be added later. Reinstall the app after each scope change.
 - Use `slack_sdk.WebClient` with the built-in retry handler:
   ```python
   client.retry_handlers.append(RateLimitErrorRetryHandler(max_retry_count=3))
@@ -443,7 +443,7 @@ Lifecycle:
 
 ---
 
-## Phase 7 — Chat Interface (Slack DM bot)
+## Phase 7 — Chat Interface (Slack DM + channel @mention bot)
 
 **Complexity: High** · Depends on: Phases 2, 3, 4 (Slack), 6
 
@@ -451,30 +451,46 @@ You picked Slack as both a read source and your daily messenger — natural chat
 
 ### `.claude/chat/bot.py`
 
-- `slack_bolt` async pattern with `AsyncSocketModeHandler`. Outbound WebSocket — no public URL, no port forwarding.
-- Listen for DMs only: filter `event.get("channel_type") == "im"`. Skip `event.get("bot_id")` and any `subtype` (so `message_changed`/`message_deleted` from edits don't loop).
-- For each DM: route to a `ClaudeSDKClient` keyed by Slack thread ts (or top-level ts if not threaded). Persist sessions in SQLite at `.claude/data/chat.db`.
-- Agent SDK session sets `os.environ["CLAUDE_INVOKED_BY"] = "chat"`, loads project settings (`setting_sources=["project"]` so skills + CLAUDE.md apply), uses Sonnet 4.6.
-- Reply in-thread (`say(text=..., thread_ts=event.get("thread_ts") or event["ts"])`) so multi-turn DMs group cleanly.
-- The bot can answer "what happened in #sales-eng overnight?" via `brunos-vault` skill + `query.py slack since 8h`. It can answer "draft a reply to that email from Alice" by reading `drafts/active/`. Same security boundaries as heartbeat — no sending on your behalf.
+- `slack_bolt` async pattern with `AsyncSocketModeHandler`. Outbound WebSocket — no public URL, no port forwarding. `slack_bolt`'s `AsyncApp` has a transitive runtime dep on `aiohttp` — it's pinned in `pyproject.toml`.
+- **Two surfaces**, both routed through one `SessionManager`:
+  - `@app.event("message")` filtered to `channel_type=im` → DMs (auto-reply, no @mention needed).
+  - `@app.event("app_mention")` → channel @mentions. Strip the `<@bot_user_id>` self-mention from `event["text"]` before sending to the SDK; bare mention with no body posts a "Yes? Mention me with a question or instruction." nudge.
+- Common filter mirrors `integrations.slack._filter_msg`: drop on `bot_id`, `subtype`, `user == bot_user_id`, or empty text.
+- **Session keying**: `f"{channel_id}:{thread_root_ts}"`. DMs (`D…:ts`), public-channel threads (`C…:ts`), and private-channel threads (`G…:ts`) all run as independent parallel sessions. Per-session `ClaudeSDKClient` is cached in-memory; SQLite at `.claude/data/state/chat.db` is just a thread index for restart inspection (MVP starts each thread fresh on restart — no replay).
+- **Channel UX caveat**: every continuation in a channel thread requires another @mention. Slack does NOT deliver `app_mention` for follow-up replies in the same thread, and we deliberately don't subscribe to `message.channels` (fire hose, would force the bot to inspect every channel message). DMs do not have this issue — every message in an IM is delivered.
+- Agent SDK session sets `os.environ["CLAUDE_INVOKED_BY"] = "chat"` BEFORE `import claude_agent_sdk`. Each options block uses `setting_sources=["project"]` (loads CLAUDE.md + Phase 5 skills) and `allowed_tools=["Read", "Write", "Edit", "Bash"]`. Model: `claude-sonnet-4-6`.
+- System prompt is built ONCE at startup via `chat.system_prompt.build_chat_system_prompt()` — composes a chat-mode preamble (Slack mrkdwn rules, Slack carve-out reminder, tool guidance) plus `hooks.session-start-context.build_context()` (canonical vault dump). Vault edits during the daemon's run aren't reflected until restart — acceptable trade-off vs ~6 file reads per message.
+- Reply in-thread via `say(text=reply, thread_ts=event.get("thread_ts") or event["ts"])` so multi-turn conversations group cleanly.
+- Per-thread `asyncio.Lock` prevents two concurrent messages in the same thread from interleaving SDK calls.
+- The bot can answer "what happened in #sales-eng overnight?" via `brunos-vault` skill + `query.py slack since`. It can draft replies by reading `drafts/active/`. Slack carve-out authorizes autonomous send IN this surface only; everything else (email, GitHub/ClickUp comments) stays draft-only.
 
 ### Platform adapter pattern
 
-`.claude/chat/adapters/slack_adapter.py` implements a `PlatformAdapter` protocol:
-- `send_message(channel, text, thread_ts)`
-- `on_message(handler)` event registration
-- `get_user_display(user_id)`
+`.claude/chat/adapters/slack_adapter.py` encapsulates Slack-specific glue (Bolt event registration, self-echo filter, mention stripping, session-key derivation). Future Discord/Teams support drops in behind a similar adapter without touching `bot.py`. Don't build them now — YAGNI; just keep all Slack imports inside the one file.
 
-Future Discord/Teams support drops in behind the same protocol. Don't build them now — YAGNI.
+### Slack app config (one-time)
 
-### Slack app event-subscription scoping
+OAuth & Permissions → **Bot Token Scopes**:
+- `chat:write` — post replies in DMs and channel threads.
+- `app_mentions:read` — receive `app_mention` events from channels.
+- (Plus the Phase 4 read scopes already present.)
 
-Set "Event Subscriptions → Bot Events" to ONLY `message.im` (NOT `message.channels`). This stops the socket from delivering channel chatter and keeps the bot scoped to DMs.
+Event Subscriptions → **Subscribe to bot events**:
+- `message.im` — DMs.
+- `app_mention` — channel @mentions.
+- Do NOT subscribe `message.channels` — it pollutes the event stream with every channel message.
 
-### The non-obvious gotcha
-Your bot receives its own `chat.postMessage` results back through Socket Mode as `message` events. Filter `event.get("bot_id")` AND `event.get("subtype")` AND compare `event["user"]` to the cached bot user ID from `auth.test`. Without this you get an infinite loop.
+App-Level Token (`xapp-...`) needs `connections:write` for Socket Mode. Reinstall the app in the workspace after each scope change. Invite the bot into channels you want to @mention it in (`/invite @brunos`).
 
-**CLAUDE.md update:** add `python .claude/chat/bot.py` to build commands. Document the `message.im`-only scoping. Mark Phase 7 done.
+### Self-echo loop gotcha
+
+The bot receives its own `chat.postMessage` results back through Socket Mode as `message` events. Filter `event.get("bot_id")` AND `event.get("subtype")` AND compare `event["user"]` to the cached `bot_user_id` from `auth.test`. Without this the bot infinite-loops responding to itself. The cached `bot_user_id` is also persisted into `slack-state.json` at startup — same key Phase 4 uses.
+
+### Phase 6 / Phase 7 boundary
+
+Once Phase 7 is live, the chat bot owns BOTH DMs AND channel @mentions (Socket Mode push). Phase 6 heartbeat must NOT also auto-reply via `slack.mentions_since_last_run()` — the polling helper should be repurposed for read-only context ("you were @mentioned 3 times since last tick → hand to drafter") rather than direct send. Otherwise both processes will double-reply.
+
+**CLAUDE.md update:** add `uv run python .claude/chat/bot.py` and `--smoke-test` to build commands. Document both event subscriptions (`message.im` + `app_mention`), the two scope additions, the channel-mention UX caveat, and the Phase 6/7 send-ownership rule. Mark Phase 7 done.
 
 ---
 
@@ -573,7 +589,7 @@ Plists at `~/Library/LaunchAgents/`:
 - `com.bruno.brunos.reflection.plist` — daily 08:00 BRT.
 - `com.bruno.brunos.weekly-review.plist` — Sundays 19:00 BRT.
 - `com.bruno.brunos.news-digest.plist` — daily 07:30 BRT.
-- `com.bruno.brunos.chat.plist` — `KeepAlive: true`, `RunAtLoad: true` for the Slack bot (Phase 7).
+- `com.bruno.brunos.chat.plist` — `KeepAlive: true`, `RunAtLoad: true` for the Slack bot (Phase 7). **Single-instance** — see 9.6.
 
 Load: `launchctl load ~/Library/LaunchAgents/com.bruno.brunos.heartbeat.plist` (and the others).
 
@@ -582,7 +598,7 @@ Load: `launchctl load ~/Library/LaunchAgents/com.bruno.brunos.heartbeat.plist` (
 Files in `/etc/systemd/system/`:
 - `brunos-heartbeat.service` (Type=oneshot) + `brunos-heartbeat.timer` (`OnCalendar=*-*-* 08..22:00:00,30:00 America/Sao_Paulo`).
 - `brunos-reflection.{service,timer}`, `brunos-weekly-review.{service,timer}`, `brunos-news-digest.{service,timer}`.
-- `brunos-chat.service` (Type=simple, `Restart=on-failure`).
+- `brunos-chat.service` (Type=simple, `Restart=on-failure`). **Single-instance** — see 9.6.
 - Every unit must set `Environment=TZ=America/Sao_Paulo` and `EnvironmentFile=/home/bruno/brunos/.env`.
 - `DB_BACKEND=postgres` and `POSTGRES_URL=postgresql://...` so the VPS uses pgvector.
 
@@ -630,7 +646,19 @@ Without this done right, daily logs corrupt within 24 hours of bidirectional use
 
 **Why this matters**: heartbeat, reflection, chat, and memory_flush all append to `daily/YYYY-MM-DD.md` concurrently across both machines. A naive Git merge produces conflict markers in the daily log on every sync. The `concat-both` driver concatenates both sides instead of conflicting. Without it, vault sync is unusable.
 
-### 9.5 Cost estimate
+### 9.5 Slack chat bot is single-instance
+
+The Phase 7 bot connects to Slack via Socket Mode and is fan-out broadcast: every connected client receives every event. If both Mac launchd and VPS systemd run `brunos-chat` simultaneously, every DM and @mention triggers two SDK turns and Bruno gets two replies posted in-thread.
+
+Pick **one** machine to run it:
+- **VPS (recommended for "always on")** — enable `brunos-chat.service`, leave `com.bruno.brunos.chat.plist` unloaded on Mac (or wrap with `Disabled: true`).
+- **Mac (for local-only iteration)** — load the plist, leave `brunos-chat.service` disabled on the VPS.
+
+The other plists/timers (heartbeat, reflection, weekly-review, news-digest) are write-once / append-only against the shared vault and DO run on both machines safely — vault sync (9.4) handles convergence. The chat bot is the lone single-instance daemon because Slack's Socket Mode delivers events to all connections, not exactly-once.
+
+If both end up running by accident, the symptom is double-replies in Slack. Kill one (`launchctl unload …` or `systemctl disable --now brunos-chat`) and restart the surviving instance.
+
+### 9.6 Cost estimate
 - **Claude Max** (your current subscription): ~$100/mo, covers heartbeat/reflection/chat at projected volume.
 - **VPS** (Hetzner CX22 / DigitalOcean Basic): $5–10/mo for 2vCPU/4GB, plenty for Postgres + heartbeat + Slack bot.
 - **Postgres**: free, runs on the VPS.
