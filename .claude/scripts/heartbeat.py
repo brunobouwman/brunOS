@@ -114,6 +114,83 @@ async def _noop_list() -> list:
     return []
 
 
+async def _split_chat_bot_handled(client, msgs: list) -> tuple[list, int]:
+    """Split Slack messages into (actionable_for_agent, handled_by_chat_bot_count).
+
+    Phase 7 chat bot owns:
+      - Channel @mentions (`app_mention` event) — anything containing `<@bot_uid>`.
+      - DMs (`message.im` event) where the bot has actually replied in-thread.
+
+    Actionable = unreplied DMs + non-mention channel messages (USER.md "replies on
+    technical channels Bruno is active in"). The unreplied-DM case is the catch-up
+    safety net for Phase 7 downtime. The handled count flows into the daily-log
+    tick entry for awareness — the bot conversation is real activity even though
+    the heartbeat doesn't need to draft on it.
+
+    Fail-open per call: any Slack API error keeps that message in the actionable
+    set — better to draft than miss it.
+    """
+    if not msgs:
+        return [], 0
+
+    state = slack._load()
+    try:
+        bot_uid = await asyncio.to_thread(slack._bot_user_id, client, state)
+    except Exception as e:
+        _log(f"  split: bot_user_id resolve failed ({e}); treating all as actionable")
+        return msgs, 0
+
+    needle = f"<@{bot_uid}>"
+    mention_count = sum(1 for m in msgs if needle in (m.text or ""))
+    after_mentions = [m for m in msgs if needle not in (m.text or "")]
+
+    try:
+        channels = await asyncio.to_thread(slack.list_channels, client)
+    except Exception as e:
+        _log(f"  split: list_channels failed ({e}); treating all post-mention as actionable")
+        return after_mentions, mention_count
+    im_ids = {ch.id for ch in channels if ch.is_im}
+
+    non_dm = [m for m in after_mentions if m.channel_id not in im_ids]
+    dm_msgs = [m for m in after_mentions if m.channel_id in im_ids]
+
+    actionable_dms: list = []
+    replied_count = 0
+    for m in dm_msgs:
+        parent_ts = m.thread_ts or m.ts
+        try:
+            replies = await asyncio.to_thread(
+                slack.get_thread, client, m.channel_id, parent_ts
+            )
+        except Exception:
+            actionable_dms.append(m)
+            continue
+        try:
+            m_ts_f = float(m.ts)
+        except ValueError:
+            actionable_dms.append(m)
+            continue
+        bot_replied = any(
+            r.user_id == bot_uid and float(r.ts) > m_ts_f
+            for r in replies
+            if r.ts
+        )
+        if bot_replied:
+            replied_count += 1
+        else:
+            actionable_dms.append(m)
+
+    handled_total = mention_count + replied_count
+    _log(
+        f"  split: total={len(msgs)} → "
+        f"actionable={len(non_dm) + len(actionable_dms)} "
+        f"(channel={len(non_dm)}, unreplied DMs={len(actionable_dms)}); "
+        f"handled by chat bot={handled_total} "
+        f"(@mentions={mention_count}, replied DMs={replied_count})"
+    )
+    return non_dm + actionable_dms, handled_total
+
+
 async def _gather() -> dict:
     s_spec = find("slack")
     g_spec = find("github")
@@ -184,6 +261,26 @@ async def _gather() -> dict:
             out[k] = []
         else:
             out[k] = r
+
+    # Phase 6/7 boundary. The chat bot owns DMs + @mentions in real-time.
+    # We split the Slack haul into two views, both kept in `out`:
+    #   - slack_msgs            — actionable for the heartbeat agent (unreplied DMs +
+    #                             non-mention channel messages). Used to drive drafts.
+    #   - slack_msgs_all        — every message gathered this tick (preserved for
+    #                             snapshot diff, daily-log tick counts, and reflection).
+    #   - slack_msgs_handled    — count of DMs the chat bot already replied to.
+    # If the filter errors, slack_msgs falls back to all messages (fail-open).
+    raw_slack = out.get("slack_msgs") or []
+    out["slack_msgs_all"] = list(raw_slack)
+    out["slack_msgs_handled"] = 0
+    if s_client is not None and raw_slack:
+        try:
+            actionable, handled = await _split_chat_bot_handled(s_client, raw_slack)
+            out["slack_msgs"] = actionable
+            out["slack_msgs_handled"] = handled
+        except Exception as e:
+            _log(f"  chat-bot split failed (fail-open): {type(e).__name__}: {e}")
+
     return out
 
 
@@ -205,13 +302,24 @@ def _build_delta_text(delta: dict, gathered: dict) -> str:
     sections.append("## Delta summary\n")
     for k, n in summary.items():
         sections.append(f"- {k}: {n}")
+    chat_bot_handled = int(gathered.get("slack_msgs_handled") or 0)
+    if chat_bot_handled:
+        sections.append(
+            f"- slack_handled_by_chat_bot: {chat_bot_handled} "
+            "(already replied in real-time — count only, do NOT draft)"
+        )
     sections.append("")
 
-    # Per-source: render with sanitize.wrap_external
-    if delta.get("slack"):
-        sections.append("## Slack — new messages\n")
-        msg_index = {(m.channel_id, m.ts): m for m in (gathered.get("slack_msgs") or [])}
-        for d in delta["slack"]:
+    # Slack: render only ACTIONABLE messages (chat bot already handled the rest).
+    # The total count above includes those for awareness in the daily-log entry,
+    # but the agent should not draft for them.
+    actionable_slack = gathered.get("slack_msgs") or []
+    actionable_keys = {(m.channel_id, m.ts) for m in actionable_slack}
+    rendered_slack = [d for d in delta.get("slack", []) if (d["channel_id"], d["ts"]) in actionable_keys]
+    if rendered_slack:
+        sections.append("## Slack — actionable messages (unreplied DMs + non-mention channel)\n")
+        msg_index = {(m.channel_id, m.ts): m for m in actionable_slack}
+        for d in rendered_slack:
             msg = msg_index.get((d["channel_id"], d["ts"]))
             text = msg.text if msg else ""
             sections.append(
@@ -407,7 +515,7 @@ WHAT TO DO THIS TICK
 
 ## Heartbeat tick (HH:MM)
 
-- Slack: <N> new (<mentions> mention, <dms> DMs)
+- Slack: <N_total> new (<chat_bot_handled> handled by chat bot, <actionable> need attention)
 - ClickUp: <overdue> overdue, <today> due today
 - GitHub: <changes>
 - Gmail: <unread>
@@ -416,7 +524,9 @@ WHAT TO DO THIS TICK
 - Habits: <auto-checked pillars or "none">
 - Notes: <agent's free-text observation, 1-3 sentences>
 
-2. For each Slack DM / Gmail email matching Bruno's drafting criteria (USER.md), generate a draft to BrunOS/Memory/drafts/active/ using the documented frontmatter (type: draft + source/source_id/recipient/subject/context/created/updated/status/language/tags). Do NOT re-draft for source_ids already in the active drafts summary.
+The Slack delta summary in your input gives you `slack` (total new) and `slack_handled_by_chat_bot` (already replied in real-time by the Phase 7 chat bot). Subtract to get the actionable count. Only the actionable subset is rendered in the "Slack — actionable messages" section below — the rest are real activity Bruno already saw, count them in the tick entry but do NOT draft for them.
+
+2. For each Slack message in the "Slack — actionable" section / Gmail email matching Bruno's drafting criteria (USER.md), generate a draft to BrunOS/Memory/drafts/active/ using the documented frontmatter (type: draft + source/source_id/recipient/subject/context/created/updated/status/language/tags). Do NOT re-draft for source_ids already in the active drafts summary. Do NOT draft for messages the chat bot already replied to.
 3. For each HABITS pillar with a positive signal, edit BrunOS/Memory/HABITS.md to flip its checkbox `- [ ]` → `- [x]`.
 4. If the time is between 18:00 and 19:00 BRT and any pillar is still unchecked, add a one-line nudge note to today's daily log under "## Afternoon nudge".
 5. End with a 1-3 sentence summary of the tick.
@@ -524,7 +634,13 @@ def _run(dry_run: bool, no_agent: bool, force: bool) -> int:
     except Exception as e:
         _log(f"  gather failed catastrophically: {type(e).__name__}: {e}")
         return 1
-    _log("  gathered: " + ", ".join(f"{k}={len(v)}" for k, v in gathered.items()))
+    _log(
+        "  gathered: "
+        + ", ".join(
+            f"{k}={v if isinstance(v, int) else len(v)}"
+            for k, v in gathered.items()
+        )
+    )
 
     # Stage 3
     _log("stage 3: snapshot + diff")

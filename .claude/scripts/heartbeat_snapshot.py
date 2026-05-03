@@ -35,10 +35,15 @@ def build_snapshot(gathered: dict) -> dict:
     """
     return {
         "ts": _ts_brt(),
+        # Snapshot uses the unfiltered Slack haul so the per-tick diff captures
+        # every message — including DMs the chat bot already handled. This keeps
+        # the daily-log activity counts honest and feeds reflection. The agent
+        # prompt separately uses gathered["slack_msgs"] (actionable subset only)
+        # to decide what to draft.
         "slack": sorted(
             (
                 {"channel_id": m.channel_id, "ts": m.ts}
-                for m in gathered.get("slack_msgs", [])
+                for m in gathered.get("slack_msgs_all", gathered.get("slack_msgs", []))
             ),
             key=lambda d: (d["channel_id"], d["ts"]),
         ),

@@ -488,7 +488,13 @@ The bot receives its own `chat.postMessage` results back through Socket Mode as 
 
 ### Phase 6 / Phase 7 boundary
 
-Once Phase 7 is live, the chat bot owns BOTH DMs AND channel @mentions (Socket Mode push). Phase 6 heartbeat must NOT also auto-reply via `slack.mentions_since_last_run()` — the polling helper should be repurposed for read-only context ("you were @mentioned 3 times since last tick → hand to drafter") rather than direct send. Otherwise both processes will double-reply.
+Once Phase 7 is live, the chat bot owns BOTH DMs AND channel @mentions in real-time (Socket Mode push). The heartbeat's `_gather()` calls `_split_chat_bot_handled()` after `slack.since_last_run()` to split the haul into:
+
+- **`slack_msgs`** (actionable for the agent) — non-mention channel messages plus DMs the chat bot did NOT already reply to (catch-up safety net for Phase 7 downtime). For each DM, `slack.get_thread(channel, parent_ts)` is consulted; if any reply has `user_id == bot_user_id` and `ts > message.ts`, the DM is treated as handled and dropped from this list.
+- **`slack_msgs_all`** (full haul) — feeds the snapshot diff and the daily-log tick counts. Reflection consumes this for trend signal — bot conversations are real activity, even if heartbeat doesn't draft on them.
+- **`slack_msgs_handled`** (count) — surfaces in the agent prompt as `slack_handled_by_chat_bot` and in the tick entry, so Bruno sees `Slack: 5 new (3 handled by chat bot, 2 need attention)` instead of a misleading `Slack: 2 new`.
+
+Failure-open per call: any Slack API error during the split keeps the message in the actionable set rather than dropping it. Drafting double-replies would be wasteful but the heartbeat agent's system prompt forbids autonomous Slack-send anyway, so the worst case is a redundant draft Bruno can ignore.
 
 **CLAUDE.md update:** add `uv run python .claude/chat/bot.py` and `--smoke-test` to build commands. Document both event subscriptions (`message.im` + `app_mention`), the two scope additions, the channel-mention UX caveat, and the Phase 6/7 send-ownership rule. Mark Phase 7 done.
 
@@ -584,21 +590,25 @@ You picked **Local + VPS**. Mac for daily use; VPS so the heartbeat keeps runnin
 
 ### 9.1 Mac (launchd)
 
-Plists at `~/Library/LaunchAgents/`:
-- `com.bruno.brunos.heartbeat.plist` — `python .claude/scripts/heartbeat.py`, `StartCalendarInterval` every 30 min between 08:00 and 22:00 BRT, `EnvironmentVariables` includes `TZ=America/Sao_Paulo` and `PATH`.
-- `com.bruno.brunos.reflection.plist` — daily 08:00 BRT.
-- `com.bruno.brunos.weekly-review.plist` — Sundays 19:00 BRT.
-- `com.bruno.brunos.news-digest.plist` — daily 07:30 BRT.
-- `com.bruno.brunos.chat.plist` — `KeepAlive: true`, `RunAtLoad: true` for the Slack bot (Phase 7). **Single-instance** — see 9.6.
+Default in this deployment is **VPS-primary, Mac is failover-ready**: install the plists below with `Disabled: true` and only `launchctl load …` them when the VPS is down. See §9.5 for why.
 
-Load: `launchctl load ~/Library/LaunchAgents/com.bruno.brunos.heartbeat.plist` (and the others).
+Plists at `~/Library/LaunchAgents/`:
+- `com.bruno.brunos.heartbeat.plist` — `python .claude/scripts/heartbeat.py`, `StartCalendarInterval` every 30 min between 08:00 and 22:00 BRT, `EnvironmentVariables` includes `TZ=America/Sao_Paulo` and `PATH`. Single-instance recommended — see §9.5.
+- `com.bruno.brunos.reflection.plist` — daily 08:00 BRT. Single-instance recommended — see §9.5.
+- `com.bruno.brunos.weekly-review.plist` — Sundays 19:00 BRT. Single-instance recommended — see §9.5.
+- `com.bruno.brunos.news-digest.plist` — daily 07:30 BRT. Single-instance recommended — see §9.5.
+- `com.bruno.brunos.chat.plist` — `KeepAlive: true`, `RunAtLoad: true` for the Slack bot (Phase 7). **Single-instance mandatory** — see §9.5.
+
+Load (failover only): `launchctl load ~/Library/LaunchAgents/com.bruno.brunos.heartbeat.plist` (and the others).
 
 ### 9.2 VPS (systemd, Linux)
 
+The VPS is the primary host: enable everything below at install time. See §9.5 for the single-instance rationale.
+
 Files in `/etc/systemd/system/`:
-- `brunos-heartbeat.service` (Type=oneshot) + `brunos-heartbeat.timer` (`OnCalendar=*-*-* 08..22:00:00,30:00 America/Sao_Paulo`).
-- `brunos-reflection.{service,timer}`, `brunos-weekly-review.{service,timer}`, `brunos-news-digest.{service,timer}`.
-- `brunos-chat.service` (Type=simple, `Restart=on-failure`). **Single-instance** — see 9.6.
+- `brunos-heartbeat.service` (Type=oneshot) + `brunos-heartbeat.timer` (`OnCalendar=*-*-* 08..22:00:00,30:00 America/Sao_Paulo`). Single-instance recommended — see §9.5.
+- `brunos-reflection.{service,timer}`, `brunos-weekly-review.{service,timer}`, `brunos-news-digest.{service,timer}`. Single-instance recommended — see §9.5.
+- `brunos-chat.service` (Type=simple, `Restart=on-failure`). **Single-instance mandatory** — see §9.5.
 - Every unit must set `Environment=TZ=America/Sao_Paulo` and `EnvironmentFile=/home/bruno/brunos/.env`.
 - `DB_BACKEND=postgres` and `POSTGRES_URL=postgresql://...` so the VPS uses pgvector.
 
@@ -646,17 +656,25 @@ Without this done right, daily logs corrupt within 24 hours of bidirectional use
 
 **Why this matters**: heartbeat, reflection, chat, and memory_flush all append to `daily/YYYY-MM-DD.md` concurrently across both machines. A naive Git merge produces conflict markers in the daily log on every sync. The `concat-both` driver concatenates both sides instead of conflicting. Without it, vault sync is unusable.
 
-### 9.5 Slack chat bot is single-instance
+### 9.5 Single-instance daemons
 
-The Phase 7 bot connects to Slack via Socket Mode and is fan-out broadcast: every connected client receives every event. If both Mac launchd and VPS systemd run `brunos-chat` simultaneously, every DM and @mention triggers two SDK turns and Bruno gets two replies posted in-thread.
+**Chat bot — single-instance is mandatory.** The Phase 7 bot connects to Slack via Socket Mode and is fan-out broadcast: every connected client receives every event. If both Mac launchd and VPS systemd run `brunos-chat` simultaneously, every DM and @mention triggers two SDK turns and Bruno gets two replies posted in-thread.
 
 Pick **one** machine to run it:
 - **VPS (recommended for "always on")** — enable `brunos-chat.service`, leave `com.bruno.brunos.chat.plist` unloaded on Mac (or wrap with `Disabled: true`).
 - **Mac (for local-only iteration)** — load the plist, leave `brunos-chat.service` disabled on the VPS.
 
-The other plists/timers (heartbeat, reflection, weekly-review, news-digest) are write-once / append-only against the shared vault and DO run on both machines safely — vault sync (9.4) handles convergence. The chat bot is the lone single-instance daemon because Slack's Socket Mode delivers events to all connections, not exactly-once.
-
 If both end up running by accident, the symptom is double-replies in Slack. Kill one (`launchctl unload …` or `systemctl disable --now brunos-chat`) and restart the surviving instance.
+
+**Heartbeat / reflection / weekly-review / news-digest — single-instance is recommended (not required).** Vault sync (§9.4) makes concurrent dual-run technically safe — the concat-both merge driver dedupes appended lines — but you pay for it three ways:
+
+1. **2× SDK cost** every 30-min tick. The heartbeat agent (Sonnet 4.6, max_turns=15) is the most expensive call in the system. Running on both machines doubles it for no functional benefit.
+2. **HABITS.md / MEMORY.md write race**. `habits.reset_for_today_if_needed()` and `memory_reflect.py` both use `shared.file_lock` which is local-only — Mac's lock doesn't see VPS's lock. Two concurrent resets at 08:00 BRT, or two concurrent reflections, can push MEMORY.md past its 5KB cap before the next compaction call catches it.
+3. **Snapshot diff cold-start on failover**. `heartbeat-state.json` and `last_reflection.json` live under `.claude/data/state/` which is gitignored from the vault — separate per machine. If VPS dies and Mac picks up the heartbeat, Mac's first tick treats every gathered item as "new" (since its previous snapshot is stale by however long Mac's been idle). One noisy tick, then back to normal. Document this so it doesn't look like a regression.
+
+Default: run heartbeat + reflection + weekly-review + news-digest on the **same machine as the chat bot** (the VPS for always-on). Keep the Mac plists installed but `Disabled: true` so failover is a single `launchctl load …` away.
+
+**Phase 6/7 robustness across machines.** The heartbeat's `_split_chat_bot_handled()` queries the Slack API directly (`conversations.replies`) to detect whether the chat bot has already replied to a DM. The Slack API is the single source of truth — it doesn't matter which machine the bot runs on, only that the API can see its replies. So heartbeat-on-Mac correctly skips DMs already handled by chat-bot-on-VPS, and vice versa. The catch-up role kicks in only when the chat bot is genuinely down — Phase 7 outage, Slack Socket Mode disconnection, or a deploy gap. Worst-case latency for an unreplied DM is the heartbeat cadence (30 min).
 
 ### 9.6 Cost estimate
 - **Claude Max** (your current subscription): ~$100/mo, covers heartbeat/reflection/chat at projected volume.
