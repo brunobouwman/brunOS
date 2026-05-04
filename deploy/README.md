@@ -38,8 +38,22 @@ Operator runbook for the two-host deployment.
    ```
    Pushes `.claude/.env` + `google_token.json` (only the runtime token, not the client secrets). Then `ssh brunoos vim /home/bruno/claude-second-brain/.claude/.env` and set:
    - `BRUNOS_VAULT_PATH=/home/bruno/BrunOS`
-   - `ANTHROPIC_API_KEY=<key>` — required on VPS (no Claude Code OAuth there).
-   - **Do NOT set `CLAUDE_CODE_OAUTH_TOKEN`** — desktop OAuth, Mac-only.
+   - **Anthropic auth**: do **not** set `ANTHROPIC_API_KEY` or `CLAUDE_CODE_OAUTH_TOKEN`. Instead, install Claude Code on the VPS and `claude login` once — the Agent SDK auto-discovers the local OAuth state (auto-refreshing tokens, per-host isolation, bills against your Max subscription). See step 3a below.
+
+3a. **Install Claude Code on VPS + login** (one-time, replaces the env-var auth path):
+   ```bash
+   # Check if Lisa already installed it system-wide:
+   ssh brunoos 'which claude || echo NOT_INSTALLED'
+
+   # If NOT_INSTALLED, install (Anthropic's official installer for Linux ARM64):
+   ssh brunoos 'curl -fsSL https://claude.ai/install.sh | bash'
+
+   # Login (device-code flow — prints a URL + code; open URL on Mac, paste code):
+   ssh -t brunoos claude login
+
+   # Smoke-test the SDK can auto-discover the OAuth state:
+   ssh brunoos 'cd /home/bruno/claude-second-brain && /usr/local/bin/uv run python .claude/chat/bot.py --smoke-test'
+   ```
 
 4. **Vault git-init** (Mac side, then VPS clone):
    ```bash

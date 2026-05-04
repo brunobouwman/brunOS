@@ -40,5 +40,10 @@ echo "      ssh $VPS_HOST 'stat -c %a /home/bruno/claude-second-brain/.claude/.e
 echo
 echo "==> remember to edit on VPS .env:"
 echo "      BRUNOS_VAULT_PATH=/home/bruno/BrunOS"
-echo "      ANTHROPIC_API_KEY=<key>           # required on VPS — no Claude Code OAuth here"
-echo "      (do NOT set CLAUDE_CODE_OAUTH_TOKEN — desktop OAuth, Mac-only)"
+echo
+echo "==> Anthropic auth: do NOT add ANTHROPIC_API_KEY or CLAUDE_CODE_OAUTH_TOKEN to .env."
+echo "    Instead, install Claude Code on the VPS and \`claude login\` there:"
+echo "      ssh brunoos 'which claude || curl -fsSL https://claude.ai/install.sh | bash'"
+echo "      ssh -t brunoos claude login"
+echo "    The Agent SDK auto-discovers the local OAuth state (auto-refresh, per-host isolation,"
+echo "    bills against your Claude Max subscription). See deploy/README.md step 3a."
