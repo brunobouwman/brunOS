@@ -1,0 +1,27 @@
+#!/usr/bin/env bash
+# Custom merge driver for Memory/daily/*.md and Memory/HABITS.md.
+# Both sides are append-only logs; concat the union of unique lines so neither
+# Mac-side nor VPS-side appends ever get lost during git-sync.
+#
+# Registered per-clone via deploy/bin/install-merge-driver.sh; referenced from
+# BrunOS/.gitattributes. Order is NOT preserved (driver sorts to compute the
+# diff). Bruno reads daily logs by timestamp anyway, so reorder is fine.
+#
+# Args from git: %O ancestor, %A local/current, %B remote/other, %P path.
+
+set -euo pipefail
+
+ANCESTOR="$1"
+LOCAL="$2"
+REMOTE="$3"
+# OUTPUT_PATH="$4" # informational; git overwrites $LOCAL in place.
+
+cp "$REMOTE" "$LOCAL.merged"
+
+# Append every line that's in LOCAL but not REMOTE.
+comm -23 <(sort -u "$LOCAL") <(sort -u "$REMOTE") | while IFS= read -r line; do
+  grep -Fxq "$line" "$LOCAL.merged" || printf '%s\n' "$line" >> "$LOCAL.merged"
+done
+
+mv "$LOCAL.merged" "$LOCAL"
+exit 0

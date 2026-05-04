@@ -1,0 +1,15 @@
+# Vault-side .gitignore — copied to BrunOS/.gitignore at vault git-init time.
+# This file lives INSIDE the vault repo, not in the code repo.
+
+# Drafts in flight contain recipient context and partial replies — keep local.
+Memory/drafts/active/*
+
+# Off-limits per SOUL.md no-financial-data boundary.
+Memory/personal/finance.md
+
+# OS noise
+.DS_Store
+
+# Obsidian editor state — local view, not vault content.
+.obsidian/workspace*
+.obsidian/cache

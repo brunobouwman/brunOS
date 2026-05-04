@@ -1,0 +1,10 @@
+[Unit]
+Description=brunoosbrain heartbeat — every 30 min between 08:00 and 22:00 BRT
+
+[Timer]
+OnCalendar=*-*-* 08..22:00/30 America/Sao_Paulo
+Persistent=false
+Unit=brunoosbrain-heartbeat.service
+
+[Install]
+WantedBy=timers.target

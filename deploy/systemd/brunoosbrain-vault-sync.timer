@@ -1,0 +1,10 @@
+[Unit]
+Description=brunoosbrain vault sync — every 2 minutes
+
+[Timer]
+OnBootSec=2min
+OnUnitActiveSec=2min
+Unit=brunoosbrain-vault-sync.service
+
+[Install]
+WantedBy=timers.target

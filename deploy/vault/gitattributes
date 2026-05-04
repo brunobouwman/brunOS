@@ -1,0 +1,7 @@
+# Vault-side .gitattributes — copied to BrunOS/.gitattributes at vault git-init time.
+# Append-only files use the concat-both merge driver so Mac-side and VPS-side
+# appends both survive a sync round-trip. Driver registration is per-clone (run
+# deploy/bin/install-merge-driver.sh from inside the vault repo on each host).
+
+Memory/daily/*.md merge=concat-both
+Memory/HABITS.md  merge=concat-both

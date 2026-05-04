@@ -1,0 +1,10 @@
+[Unit]
+Description=brunoosbrain memory reflection — daily 08:00 BRT (before first heartbeat)
+
+[Timer]
+OnCalendar=*-*-* 08:00 America/Sao_Paulo
+Persistent=true
+Unit=brunoosbrain-reflect.service
+
+[Install]
+WantedBy=timers.target

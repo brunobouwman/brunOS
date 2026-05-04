@@ -129,7 +129,7 @@ Hooks in `.claude/settings.json` invoke scripts via `uv run python ...` so they 
 
 ## Memory search (Phase 3)
 
-Embedding model: `BAAI/bge-small-en-v1.5` via FastEmbed (384-dim, asymmetric — `passage_embed` for indexing, `query_embed` for retrieval). Cache: `.claude/data/fastembed_cache/`. DB: `.claude/data/state/memory.db` (SQLite + sqlite-vec + FTS5; Postgres+pgvector path stubbed for Phase 9 VPS deploy). Hybrid retrieval merges vector top-k×3 + FTS top-k×3 via RRF (k=60). The indexer excludes `Memory/personal/finance.md` per the SOUL.md no-financial-data boundary.
+Embedding model: `BAAI/bge-small-en-v1.5` via FastEmbed (384-dim, asymmetric — `passage_embed` for indexing, `query_embed` for retrieval). Cache: `.claude/data/fastembed_cache/`. DB: `.claude/data/state/memory.db` (SQLite + sqlite-vec + FTS5; same engine on Mac and VPS — each host keeps its own index, rebuilt from the synced vault). Hybrid retrieval merges vector top-k×3 + FTS top-k×3 via RRF (k=60). The indexer excludes `Memory/personal/finance.md` per the SOUL.md no-financial-data boundary.
 
 ## Integrations (Phase 4)
 
@@ -219,6 +219,56 @@ Four independent layers guard the long-running agent surfaces:
 4. **Command guardrails** — `.claude/hooks/dangerous-bash.py` runs as a Bash-only PreToolUse hook. Patterns live in `DANGEROUS_BASH_PATTERNS` inside `.claude/scripts/shared.py` and cover destructive filesystem commands, privilege escalation, outbound curl/wget/netcat-style exfil, package installs, destructive git commands, and process/system kills.
 
 Hook order in `.claude/settings.json`: `block-secrets.py` first, `dangerous-bash.py` second, `protect-soul.py` last. Hook input is JSON on stdin. `block-secrets.py` and `protect-soul.py` soft-block with `{"decision":"block","reason":"..."}` on stdout; `dangerous-bash.py` hard-blocks with exit 2 and stderr.
+
+## Deployment (Phase 9)
+
+Two-host deployment: a **Hetzner CX21 ARM64 droplet at `49.13.165.23`, shared with Lisa**, hosts the always-on services (heartbeat, reflection, weekly review, news digest, Slack chat bot, vault git-sync) under a `brunoosbrain-*` systemd namespace; Mac keeps the same units installed as launchd plists with `Disabled=true` for one-command failover. Vault becomes its own private GitHub repo with a `concat-both` merge driver so daily-log appends survive bidirectional sync. Storage stays on **SQLite + sqlite-vec on both hosts** — the DB file (`.claude/data/state/memory.db`) is per-host, rebuilt from the synced vault on first run.
+
+### Host shape
+
+- **VPS**: shared with Lisa. Bruno's namespace = user `bruno`, services `brunoosbrain-*`, log dir `/var/log/brunoosbrain/`, repo `/home/bruno/claude-second-brain`, vault `/home/bruno/BrunOS`. Lisa's namespace = `lisa` / `lisaosbrain-*` — never touch.
+- **Mac**: failover-ready. Plists live at `~/Library/LaunchAgents/com.bruno.brunos.<svc>.plist`, all `Disabled=true` except `git-sync` (read consumer, dual-run safe).
+- **uv path**: `/usr/local/bin/uv` on VPS (system-wide, Lisa's bootstrap); `/Users/brunobouwman/.local/bin/uv` on Mac (per-user). Don't conflate.
+
+### Deploy artifacts (`deploy/`)
+
+```
+deploy/
+  README.md                          operator runbook (read this first)
+  bin/                               idempotent helpers (seed/bootstrap/sync/install/merge-driver)
+  launchd/com.bruno.brunos.*.plist   6 Mac plists (Disabled=true except git-sync)
+  systemd/brunoosbrain-*             6 services + 5 timers (slackbot has no timer)
+  vault/{gitignore,gitattributes}    templates copied to BrunOS/.gitignore + .gitattributes at vault git-init
+setup.sh                             repo-root idempotent venv bootstrap (uv sync)
+```
+
+### Vault git-sync + concat-both merge driver
+
+Vault is a separate private GitHub repo (`brunobouwman/brunos-vault`). VPS+Mac both run `git-sync` (simonthum) every 2 min. `Memory/daily/*.md` and `Memory/HABITS.md` use the `concat-both` merge driver (`deploy/bin/git-merge-concat`) so simultaneous appends from both hosts survive merge — at the cost of line order (driver sorts to compute the diff). The driver registration is per-clone (`deploy/bin/install-merge-driver.sh` runs `git config merge.concat-both.driver` inside the vault repo on each host). Sensitive paths excluded from the vault repo: `Memory/drafts/active/*` (recipient context), `Memory/personal/finance.md` (SOUL.md no-financial-data boundary), `.DS_Store`, `.obsidian/workspace*`, `.obsidian/cache`.
+
+### Single-instance policy
+
+Slack chat bot is **mandatory single-instance** — Slack Socket Mode is a fan-out broadcast, so duplicate clients post duplicate replies. Failover protocol: stop the VPS slackbot (`ssh brunoos sudo systemctl stop brunoosbrain-slackbot`) BEFORE bootstrapping the Mac plist. Heartbeat / reflect / weekly-review / news-digest are also **strongly recommended** single-instance: concat-both protects daily logs but `MEMORY.md` and `HABITS.md` writes can race.
+
+### Snapshot cold-start on failover
+
+`heartbeat-state.json` (snapshot for `_diff_snapshot`) lives in the code repo's `.claude/data/state/`, not in the vault git repo. On failover the new host has no prior snapshot, so the first tick treats everything as new and produces a noisy first-run delta. One-time cost; ignore.
+
+### Logs
+
+| Where | Path | View |
+|-------|------|------|
+| VPS (file) | `/var/log/brunoosbrain/<svc>.log` | `tail -f /var/log/brunoosbrain/<svc>.log` |
+| VPS (journal) | systemd journal | `journalctl -u brunoosbrain-<svc> -f` |
+| Mac | `~/Library/Logs/com.bruno.brunos.<svc>.log` | `tail -f ~/Library/Logs/com.bruno.brunos.<svc>.log` |
+
+### OAuth refresh-token portability
+
+Google refresh tokens bind to OAuth `client_id`, not the machine. `bootstrap_google_oauth.py` runs once on Mac (browser consent); resulting `google_token.json` is `scp`'d to VPS by `deploy/bin/sync-secrets.sh`. **Only the runtime token** is needed on VPS — `google_client_secrets.json` stays Mac-only. If the consent screen is in **Testing** mode, refresh tokens expire after 7 days; switch to **In Production / Self-Published** to make them durable.
+
+### Coexistence with Lisa
+
+Never `systemctl stop lisaosbrain-*`, never `DROP ROLE lisaosbrain`, never edit `/home/lisa/`. If memory pressure shows up on the shared CX21 (2 vCPU / 4 GB) at simultaneous :00/:30 ticks, stagger Bruno's heartbeat with `OnCalendar=*-*-* 08..22:15/30 America/Sao_Paulo`. Operator runbook in `deploy/README.md` has the full coexistence checklist + failover one-liner.
 
 ## Phase status
 
