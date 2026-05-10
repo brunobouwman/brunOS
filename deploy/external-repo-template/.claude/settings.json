@@ -1,0 +1,26 @@
+{
+  "_comment": "External-repo capture template (Phase A). Drop into any project repo's .claude/ to route SessionEnd + PreCompact transcripts into BrunOS/Memory/_inbox/sessions/<project>/. Replace <project> and <default-export>; absolute paths assume Bruno's Mac (~/Documents/claude-second-brain). On VPS or Lisa's machine, swap the BRUNOS_REPO path.",
+  "hooks": {
+    "SessionEnd": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "/Users/brunobouwman/Documents/claude-second-brain/.venv/bin/python /Users/brunobouwman/Documents/claude-second-brain/.claude/hooks/session-end-flush.py --project=<project> --default-export=<default-export>"
+          }
+        ]
+      }
+    ],
+    "PreCompact": [
+      {
+        "matcher": "manual|auto",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "/Users/brunobouwman/Documents/claude-second-brain/.venv/bin/python /Users/brunobouwman/Documents/claude-second-brain/.claude/hooks/pre-compact-flush.py --project=<project> --default-export=<default-export>"
+          }
+        ]
+      }
+    ]
+  }
+}

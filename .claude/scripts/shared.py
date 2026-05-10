@@ -231,6 +231,63 @@ def append_to_daily_log(line: str, dt: datetime | None = None) -> Path:
     return daily_path
 
 
+_PROJECT_SLUG_RE = re.compile(r"[^a-z0-9_-]+")
+_VALID_EXPORT_TARGETS = {"personal", "linos-protostack", "discard"}
+
+
+def _slug(s: str) -> str:
+    return _PROJECT_SLUG_RE.sub("-", s.strip().lower()).strip("-") or "unknown"
+
+
+def write_inbox_capture(
+    *,
+    project: str,
+    default_export: str,
+    session_id: str,
+    source: str,
+    body: str,
+    dt: datetime | None = None,
+) -> Path:
+    """Write a session-capture file into the per-project inbox.
+
+    Path: vault/Memory/_inbox/sessions/<project-slug>/<YYYY-MM-DD>-<HHMMSS>-<sid>.md
+    Frontmatter carries `project`, `default_export`, `session_id`, `source` so
+    Phase B reflection can route without re-classifying every item from scratch.
+
+    Phase A only writes — no classification, no promotion. Reflection picks
+    these up on its own cadence.
+    """
+    dt = dt or now_brt()
+    project_slug = _slug(project)
+    if default_export not in _VALID_EXPORT_TARGETS:
+        default_export = "personal"
+    sid_short = (session_id or "unknown").replace("-", "")[:8] or "unknown"
+    fname = f"{dt.strftime('%Y-%m-%d')}-{dt.strftime('%H%M%S')}-{sid_short}.md"
+    inbox_dir = vault_path() / "Memory" / "_inbox" / "sessions" / project_slug
+    target = inbox_dir / fname
+    ts = _ts_brt(dt)
+    frontmatter = (
+        "---\n"
+        "type: inbox\n"
+        f"created: {ts}\n"
+        f"updated: {ts}\n"
+        f"project: {project_slug}\n"
+        f"default_export: {default_export}\n"
+        f"session_id: {session_id or 'unknown'}\n"
+        f"source: {source}\n"
+        "tags:\n"
+        "  - inbox\n"
+        f"  - {project_slug}\n"
+        "  - session-capture\n"
+        "status: active\n"
+        "---\n\n"
+    )
+    body_text = body if body.endswith("\n") else body + "\n"
+    with file_lock(target):
+        atomic_write(target, frontmatter + body_text)
+    return target
+
+
 def save_state(path: os.PathLike[str] | str, obj) -> None:
     atomic_write(path, json.dumps(obj, indent=2, ensure_ascii=False), stamp_updated=False)
 
@@ -308,11 +365,23 @@ def _resolve_uv() -> str | None:
     return None
 
 
-def dispatch_flush(stdin_data: dict, source: str) -> Path | None:
+def dispatch_flush(
+    stdin_data: dict,
+    source: str,
+    *,
+    project: str | None = None,
+    default_export: str | None = None,
+) -> Path | None:
     """Persist transcript JSON and Popen memory_flush.py detached via `uv run`.
 
     Falls back to .venv/bin/python or sys.executable if uv is not on PATH.
     Returns the transcript path on success; None if write failed.
+
+    `project` and `default_export` are Phase A capture-routing metadata.
+    When `project` is set (and not "brunos"), the flush is routed to
+    Memory/_inbox/sessions/<project>/ instead of the daily log. The
+    default_export tag rides along in the inbox file's frontmatter for
+    Phase B reflection to consume.
     """
     import subprocess
     import sys
@@ -323,6 +392,10 @@ def dispatch_flush(stdin_data: dict, source: str) -> Path | None:
     payload = dict(stdin_data)
     payload.setdefault("_source", source)
     payload.setdefault("_dispatched_at", _ts_brt())
+    if project:
+        payload["_project"] = project
+    if default_export:
+        payload["_default_export"] = default_export
     try:
         save_state(transcript_path, payload)
     except OSError:

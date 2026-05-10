@@ -7,6 +7,11 @@ Memory/drafts/active/*
 # Off-limits per SOUL.md no-financial-data boundary.
 Memory/personal/finance.md
 
+# Phase A inbox — raw per-session captures from external project repos.
+# High-volume, pre-classification, host-local. LinOS reflection (Phase C)
+# reads from a downstream export folder, not directly from here.
+Memory/_inbox/
+
 # OS noise
 .DS_Store
 

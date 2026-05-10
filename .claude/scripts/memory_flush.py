@@ -43,6 +43,7 @@ from shared import (  # noqa: E402
     now_brt,
     save_state,
     trim_dedup_entries,
+    write_inbox_capture,
     _ts_brt,
 )
 
@@ -55,6 +56,17 @@ SYSTEM_PROMPT = """You distil a Claude Code session transcript into durable memo
 for BrunOS. Output only what is worth remembering across sessions: decisions made, \
 lessons learned, surprising findings, blockers and TODOs. Skip routine tool output, \
 repeated context, and conversational filler.
+
+NEVER include credentials in your output, even if they appear in the transcript. \
+This includes: passwords, API keys, OAuth tokens, bearer tokens, JWTs, SSH keys, \
+private keys, postgres/mysql/mongodb connection strings (`postgresql://user:pass@...`), \
+session cookies, AWS access keys, secrets in env-var assignments \
+(`OPENAI_API_KEY=sk-...`, `PGPASSWORD=...`, `GOOGLE_API_KEY=...`). When a decision \
+or lesson genuinely requires referring to one of these, abstract it (e.g., \
+"rotated the Vertik prod DB password" — not the password itself). Same rule for \
+internal IPs of private infrastructure: refer to roles ("the prod DB") rather than \
+literal addresses. The bar: if a bullet contains a string that could authenticate \
+someone or grant access to a system, rewrite it.
 
 Format: terse markdown bullets, each one self-contained (no pronouns referring to \
 prior bullets). Maximum 12 bullets. If nothing in the transcript meets the bar, \
@@ -192,12 +204,25 @@ def main(argv: list[str]) -> int:
         _unlink(kickoff_path)
         return 0
 
+    project = (kickoff.get("_project") or "").strip()
+    default_export = (kickoff.get("_default_export") or "").strip()
+    source = kickoff.get("_source") or "session-end"
     header = f"## Memory flush ({now_brt().strftime('%H:%M')})"
     block = f"\n{header}\n\n{output.strip()}\n"
+
     try:
-        append_to_daily_log(block)
+        if project and project.lower() != "brunos":
+            write_inbox_capture(
+                project=project,
+                default_export=default_export or "personal",
+                session_id=session_id,
+                source=source,
+                body=block,
+            )
+        else:
+            append_to_daily_log(block)
     except Exception as e:
-        sys.stderr.write(f"memory_flush: append failed: {type(e).__name__}: {e}\n")
+        sys.stderr.write(f"memory_flush: write failed: {type(e).__name__}: {e}\n")
         return 0
 
     _record_flush(session_id)
