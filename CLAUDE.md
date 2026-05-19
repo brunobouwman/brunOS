@@ -281,7 +281,7 @@ Never `systemctl stop lisaosbrain-*`, never `DROP ROLE lisaosbrain`, never edit 
 - [x] Phase 6 — Heartbeat + Reflection + Drafts + Habits (2026-05-03)
 - [x] Phase 7 — Slack chat bot (2026-05-03)
 - [x] Phase 8 — Security hardening (4 layers) (2026-05-03)
-- [ ] Phase 9 — Deployment (Mac launchd + VPS systemd + vault git-sync)
+- [x] Phase 9 — Deployment (VPS systemd primary on `LinOS`/49.13.165.23; Mac launchd installed-but-disabled for failover; vault git-sync to `brunobouwman/brunOS-Vault`) (2026-05-19)
 
 ## Reference
 
