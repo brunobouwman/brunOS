@@ -222,7 +222,11 @@ Hook order in `.claude/settings.json`: `block-secrets.py` first, `dangerous-bash
 
 ## Deployment (Phase 9)
 
-Two-host deployment: a **Hetzner CX21 ARM64 droplet at `49.13.165.23`, shared with Lisa**, hosts the always-on services (heartbeat, reflection, weekly review, news digest, Slack chat bot, vault git-sync) under a `brunoosbrain-*` systemd namespace; Mac keeps the same units installed as launchd plists with `Disabled=true` for one-command failover. Vault becomes its own private GitHub repo with a `concat-both` merge driver so daily-log appends survive bidirectional sync. Storage stays on **SQLite + sqlite-vec on both hosts** — the DB file (`.claude/data/state/memory.db`) is per-host, rebuilt from the synced vault on first run.
+Two-host deployment: a **Hetzner CX21 ARM64 droplet at `49.13.165.23`, shared with Lisa**, hosts the always-on services (heartbeat, reflection, weekly review, news digest, Slack chat bot, vault git-sync, code git-sync) under a `brunoosbrain-*` systemd namespace; Mac keeps the same units installed as launchd plists with `Disabled=true` for one-command failover. Vault becomes its own private GitHub repo with a `concat-both` merge driver so daily-log appends survive bidirectional sync. Storage stays on **SQLite + sqlite-vec on both hosts** — the DB file (`.claude/data/state/memory.db`) is per-host, rebuilt from the synced vault on first run.
+
+### Code-sync (pull-only, every 30 min)
+
+`brunoosbrain-code-sync.timer` runs `git pull --ff-only origin main` in `/home/bruno/claude-second-brain` every 30 min. Pull-only (Mac is the sole writer to the code repo, VPS is read-only). `--ff-only` makes the pull FAIL LOUDLY if anything diverged on VPS rather than auto-merging. Log: `/var/log/brunoosbrain/code-sync.log`. Mac doesn't run this unit (Mac is the source of truth for code). **Caveats:** (a) slackbot is a long-running daemon — code changes touching `chat/*.py` need explicit `sudo systemctl restart brunoosbrain-slackbot`; oneshot timers (heartbeat/reflect/etc.) re-exec each tick and pick up changes automatically. (b) `.env` is gitignored — new env vars introduced by code changes need a manual append to VPS `.env`.
 
 ### Host shape
 
@@ -237,7 +241,7 @@ deploy/
   README.md                          operator runbook (read this first)
   bin/                               idempotent helpers (seed/bootstrap/sync/install/merge-driver)
   launchd/com.bruno.brunos.*.plist   6 Mac plists (Disabled=true except git-sync)
-  systemd/brunoosbrain-*             6 services + 5 timers (slackbot has no timer)
+  systemd/brunoosbrain-*             7 services + 6 timers (slackbot has no timer)
   vault/{gitignore,gitattributes}    templates copied to BrunOS/.gitignore + .gitattributes at vault git-init
 setup.sh                             repo-root idempotent venv bootstrap (uv sync)
 ```

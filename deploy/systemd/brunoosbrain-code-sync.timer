@@ -1,0 +1,10 @@
+[Unit]
+Description=brunoosbrain code sync — every 30 minutes
+
+[Timer]
+OnBootSec=5min
+OnUnitActiveSec=30min
+Unit=brunoosbrain-code-sync.service
+
+[Install]
+WantedBy=timers.target
