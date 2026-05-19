@@ -5,6 +5,9 @@ allowlist configured at token-creation time — adding a new repo requires
 re-issuing the token.
 
 GITHUB_DEFAULT_REPO (env, format `owner/name`) is used when --repo is omitted.
+GITHUB_USER (env, github handle e.g. "brunobouwman") scopes recent_commits to
+Bruno's authorship so heartbeat ai-learning + weekly-review "what got done"
+reflect his activity, not teammates'. Override per-call with author=.
 """
 
 from __future__ import annotations
@@ -143,11 +146,18 @@ def open_prs(g, repo_full_name: str) -> list[PullRequest]:
     return out
 
 
-def recent_commits(g, repo_full_name: str, days: int = 7) -> list[Commit]:
+def recent_commits(
+    g, repo_full_name: str, days: int = 7, author: str | None = None
+) -> list[Commit]:
     repo = g.get_repo(repo_full_name)
     since = now_brt() - timedelta(days=days)
+    if author is None:
+        author = os.environ.get("GITHUB_USER", "").strip() or None
+    kwargs = {"since": since}
+    if author:
+        kwargs["author"] = author
     out: list[Commit] = []
-    for c in repo.get_commits(since=since):
+    for c in repo.get_commits(**kwargs):
         msg = (c.commit.message or "").splitlines()[0][:200]
         author = ""
         if c.author:
@@ -300,6 +310,11 @@ def add_subparser(sub: argparse._SubParsersAction) -> None:
     pr = sp.add_parser("recent", help="Recent commits in a repo")
     pr.add_argument("--repo", default=None)
     pr.add_argument("--days", type=int, default=7)
+    pr.add_argument(
+        "--author",
+        default=None,
+        help="GitHub handle. Falls back to $GITHUB_USER. Use '' to disable filter.",
+    )
 
     poi = sp.add_parser("open-issue", help="Create a new issue (label: agent-drafted)")
     poi.add_argument("--repo", default=None)
@@ -322,7 +337,7 @@ def cli(args: argparse.Namespace) -> int:
         print(format_for_context(prs=out))
         return 0
     if cmd == "recent":
-        out = recent_commits(g, repo, days=args.days)
+        out = recent_commits(g, repo, days=args.days, author=args.author)
         print(format_for_context(commits=out))
         return 0
     if cmd == "open-issue":
