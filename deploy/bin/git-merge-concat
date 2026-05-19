@@ -20,7 +20,7 @@ cp "$REMOTE" "$LOCAL.merged"
 
 # Append every line that's in LOCAL but not REMOTE.
 comm -23 <(sort -u "$LOCAL") <(sort -u "$REMOTE") | while IFS= read -r line; do
-  grep -Fxq "$line" "$LOCAL.merged" || printf '%s\n' "$line" >> "$LOCAL.merged"
+  grep -Fxq -- "$line" "$LOCAL.merged" || printf '%s\n' "$line" >> "$LOCAL.merged"
 done
 
 mv "$LOCAL.merged" "$LOCAL"
