@@ -29,13 +29,13 @@ DEFAULT_FEEDS: list[str] = [
     "https://rss.arxiv.org/rss/cs.AI",
     "https://rss.arxiv.org/rss/cs.LG",
     "https://rss.arxiv.org/rss/cs.CL",
-    "https://www.anthropic.com/news/rss.xml",
     "https://openai.com/blog/rss.xml",
     "https://deepmind.google/blog/rss.xml",
     "https://research.google/blog/rss/",
     "https://news.smol.ai/rss.xml",
     "https://simonwillison.net/atom/everything/",
     "https://hnrss.org/newest?q=AI+OR+LLM&points=50",
+    "https://www.a16z.news/feed",
 ]
 
 
