@@ -30,6 +30,19 @@ from shared import vault_path  # noqa: E402
 CANONICAL_ORDER = ["SOUL.md", "USER.md", "MEMORY.md"]
 TAIL_ORDER = ["HEARTBEAT.md", "HABITS.md"]
 
+PREAMBLE = (
+    "<!-- BRUNOS_SESSION_INIT -->\n"
+    "BrunOS session context loaded below: SOUL.md, USER.md, MEMORY.md, last 3 daily logs, "
+    "HEARTBEAT.md, HABITS.md.\n\n"
+    "IF YOU CAN ONLY SEE THIS PREAMBLE AND A TRUNCATION NOTICE (you are running under Claude "
+    "Code and the hook output exceeded the inline cap), the full payload was spilled to a file. "
+    "The path appears in your system-reminder as \"Full output saved to: ...\". READ that file "
+    "with the Read tool BEFORE responding to Bruno — it is your working memory for this session, "
+    "not optional context.\n\n"
+    "If every section below is visible (Slack / Agent-SDK runtime, no truncation), no action "
+    "needed — proceed normally.\n"
+)
+
 
 def _read(path: Path) -> str:
     try:
@@ -48,9 +61,9 @@ def build_context() -> str:
 
     bootstrap = memory / "BOOTSTRAP.md"
     if bootstrap.exists():
-        return _wrap("BOOTSTRAP.md", _read(bootstrap))
+        return PREAMBLE + "\n" + _wrap("BOOTSTRAP.md", _read(bootstrap))
 
-    parts: list[str] = []
+    parts: list[str] = [PREAMBLE]
     for name in CANONICAL_ORDER:
         body = _read(memory / name)
         if body:

@@ -239,6 +239,41 @@ def _slug(s: str) -> str:
     return _PROJECT_SLUG_RE.sub("-", s.strip().lower()).strip("-") or "unknown"
 
 
+_GENERIC_PARENT_DIRS = {
+    "documents", "projects", "code", "repos", "src", "workspace",
+    "dev", "work", "github", "brunobouwman",
+}
+
+
+def derive_project_slug() -> str | None:
+    """Auto-derive a flush-routing project slug from $CLAUDE_PROJECT_DIR.
+
+    Returns None when the project dir is BrunOS itself (route to daily log)
+    or when the env var is missing/unreadable. Otherwise returns a slug of
+    the form `<parent>-<base>` when the parent isn't a generic wrapper dir,
+    else just `<base>`. Matches the existing `vertik-lab-agent` convention.
+    """
+    raw = os.environ.get("CLAUDE_PROJECT_DIR")
+    if not raw:
+        return None
+    try:
+        project_dir = Path(raw).resolve()
+    except OSError:
+        return None
+    try:
+        if project_dir == REPO_ROOT.resolve():
+            return None
+    except OSError:
+        pass
+    base = project_dir.name
+    if not base:
+        return None
+    parent_name = project_dir.parent.name
+    if parent_name and parent_name.lower() not in _GENERIC_PARENT_DIRS:
+        return _slug(f"{parent_name}-{base}")
+    return _slug(base)
+
+
 def write_inbox_capture(
     *,
     project: str,

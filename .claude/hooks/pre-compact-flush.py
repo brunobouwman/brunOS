@@ -39,12 +39,13 @@ def main() -> int:
         sys.stderr.write(f"pre-compact-flush: stdin parse failed ({e})\n")
         return 0
     try:
-        from shared import dispatch_flush
+        from shared import derive_project_slug, dispatch_flush
 
+        project = args.project if args.project else derive_project_slug()
         dispatch_flush(
             data,
             source="pre-compact",
-            project=args.project,
+            project=project,
             default_export=args.default_export,
         )
     except Exception as e:
