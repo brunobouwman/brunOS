@@ -52,10 +52,10 @@ MIN_TRANSCRIPT_BYTES = 2048
 MAX_INPUT_CHARS = 200_000
 LAST_FLUSH_PATH = STATE_DIR / "last_flush.json"
 
-SYSTEM_PROMPT = """You distil a Claude Code session transcript into durable memory \
-for BrunOS. Output only what is worth remembering across sessions: decisions made, \
-lessons learned, surprising findings, blockers and TODOs. Skip routine tool output, \
-repeated context, and conversational filler.
+SYSTEM_PROMPT = """You distil an agent session transcript (Claude Code or Codex) \
+into durable memory for BrunOS. Output only what is worth remembering across \
+sessions: decisions made, lessons learned, surprising findings, blockers and TODOs. \
+Skip routine tool output, repeated context, and conversational filler.
 
 NEVER include credentials in your output, even if they appear in the transcript. \
 This includes: passwords, API keys, OAuth tokens, bearer tokens, JWTs, SSH keys, \
@@ -146,11 +146,28 @@ def _load_kickoff(path: Path) -> dict | None:
     return data if isinstance(data, dict) else None
 
 
-def _load_session_transcript(transcript_ref: str) -> str | None:
-    """Read the actual Claude Code session JSONL referenced by the kickoff."""
+def _load_session_transcript(transcript_ref: str, origin: str = "claude-code") -> str | None:
+    """Read the agent session transcript referenced by the kickoff.
+
+    For Claude Code (`origin="claude-code"`, default), reads the JSONL file
+    as raw text — the existing distillation prompt handles Claude Code's
+    JSONL turn shape directly.
+
+    For Codex rollouts (`origin="codex"`), uses the codex_rollout parser to
+    extract a clean USER/ASSISTANT plaintext stream, dropping reasoning
+    blobs, base_instructions, tool-call noise, and token-count events.
+    """
     p = Path(transcript_ref)
     if not p.exists():
         return None
+    if origin == "codex":
+        from codex_rollout import parse_rollout
+
+        result = parse_rollout(p)
+        if result is None:
+            return None
+        _meta, text = result
+        return text or None
     try:
         return p.read_text(encoding="utf-8")
     except OSError:
@@ -183,8 +200,9 @@ def main(argv: list[str]) -> int:
         return 0
 
     transcript_ref = kickoff.get("transcript_path")
+    origin = (kickoff.get("_origin") or "claude-code").strip().lower()
     transcript_text = (
-        _load_session_transcript(transcript_ref) if transcript_ref else None
+        _load_session_transcript(transcript_ref, origin) if transcript_ref else None
     )
     if transcript_text is None or len(transcript_text) < MIN_TRANSCRIPT_BYTES:
         _unlink(kickoff_path)

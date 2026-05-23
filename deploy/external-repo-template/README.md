@@ -1,13 +1,16 @@
 # External-repo capture template (Phase A)
 
-Drop the contents of this directory into any project repo to route Claude Code session captures into BrunOS's per-project inbox at `BrunOS/Memory/_inbox/sessions/<project>/`.
+Drop the contents of this directory into any project repo to route Claude Code session captures into BrunOS's per-project inbox at `BrunOS/Memory/_inbox/sessions/<project>/` — and to inject that project's accumulated memory back at the start of each new session.
 
 ## What you get
 
+- **SessionStart** — at session start (and resume), `session-start-project.py` injects, in order: **SOUL.md + USER.md** (the agent's identity and Bruno's profile — always, so a work session still knows who it is and who it works for), then an optional consolidated context file (`--context-file`), then the most-recent distilled captures from `_inbox/sessions/<project>/`. It deliberately omits MEMORY.md, daily logs, HEARTBEAT.md and HABITS.md — the operational second-brain-self files. (The full-vault dump is `session-start-context.py`, BrunOS-self only.)
 - **SessionEnd** — at the end of each session, a Sonnet-distilled bullet list of the durable bits lands in the inbox.
 - **PreCompact** — same, fired before context compaction so long sessions don't lose the early thinking.
 
-Captures are NOT written to the daily log (which stays scoped to BrunOS-self work) and NOT auto-promoted to MEMORY.md. They sit in `_inbox/` for reflection (Phase B+) to classify and route.
+Capture (SessionEnd/PreCompact) and injection (SessionStart) share the same `<project>` slug, so a session reads back what prior sessions wrote. Captures are NOT written to the daily log (which stays scoped to BrunOS-self work) and NOT auto-promoted to MEMORY.md. They sit in `_inbox/` for reflection (Phase B+) to classify and route.
+
+**Keep the slug consistent across capture surfaces.** If this repo's Codex sessions are also captured (via `codex_watcher.py` / the codex template), use the SAME slug there — otherwise the repo's knowledge splits across two inbox folders and SessionStart only sees one of them. (The watcher derives its slug from the repo directory name, e.g. `vertik-lab-agent`; match that unless you have a reason not to.)
 
 ## Choose: settings.json vs settings.local.json
 
@@ -22,16 +25,18 @@ Captures are NOT written to the daily log (which stays scoped to BrunOS-self wor
 # In the new project repo (solo / cemetery — settings.json is fine):
 mkdir -p .claude
 cp /Users/brunobouwman/Documents/claude-second-brain/deploy/external-repo-template/.claude/settings.json .claude/settings.json
-sed -i '' 's/<project>/cemetery/g; s/<default-export>/linos-protostack/g' .claude/settings.json
+sed -i '' 's/<project>/cemetery/g; s|<context-file>|projects/memorial-colinas.md|g; s/<default-export>/linos-protostack/g' .claude/settings.json
 
 # In a team-shared repo (Vertik, etc — use settings.local.json):
 mkdir -p .claude
 cp /Users/brunobouwman/Documents/claude-second-brain/deploy/external-repo-template/.claude/settings.json .claude/settings.local.json
-sed -i '' 's/<project>/vertik-something/g; s/<default-export>/personal/g' .claude/settings.local.json
+sed -i '' 's/<project>/vertik-something/g; s|<context-file>|projects/vertik.md|g; s/<default-export>/personal/g' .claude/settings.local.json
 # Verify .claude or settings.local.json is gitignored before committing other changes.
 ```
 
 `<project>` is a slug like `cemetery`, `vertik-ext`, `client-acme`. It becomes the inbox subfolder name. Lowercase, dashes only — the writer slugs anything else automatically.
+
+`<context-file>` is an OPTIONAL `Memory/`-relative path to a consolidated project file (e.g. `projects/vertik.md`) that SessionStart prepends to the injected captures. If there's no such file, delete the entire `--context-file=<context-file>` flag from the SessionStart command — the hook still injects the recent captures on their own.
 
 `<default-export>` is one of:
 - `personal` — capture stays in BrunOS only. Use for Bruno-solo work (Vertik, personal experiments).

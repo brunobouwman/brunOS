@@ -1,6 +1,17 @@
 {
-  "_comment": "External-repo capture template (Phase A). Drop into any project repo's .claude/ to route SessionEnd + PreCompact transcripts into BrunOS/Memory/_inbox/sessions/<project>/. Replace <project> and <default-export>; absolute paths assume Bruno's Mac (~/Documents/claude-second-brain). On VPS or Lisa's machine, swap the BRUNOS_REPO path.",
+  "_comment": "External-repo capture template (Phase A). Drop into any project repo's .claude/ to (1) inject this project's BrunOS context at SessionStart and (2) route SessionEnd + PreCompact transcripts into BrunOS/Memory/_inbox/sessions/<project>/. Replace <project> and <default-export>; the SessionStart --context-file=<context-file> is OPTIONAL (a Memory/-relative path like projects/foo.md) — drop that flag if there's no consolidated file. Absolute paths assume Bruno's Mac (~/Documents/claude-second-brain); on VPS or Lisa's machine, swap the BRUNOS_REPO path. SessionStart always injects SOUL.md + USER.md (identity + Bruno's profile) plus the per-project context + recent captures, but NOT MEMORY/daily/HEARTBEAT/HABITS (the full-vault dump is session-start-context.py, BrunOS-self only).",
   "hooks": {
+    "SessionStart": [
+      {
+        "matcher": "startup|resume",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "/Users/brunobouwman/Documents/claude-second-brain/.venv/bin/python /Users/brunobouwman/Documents/claude-second-brain/.claude/hooks/session-start-project.py --project=<project> --context-file=<context-file> --default-export=<default-export>"
+          }
+        ]
+      }
+    ],
     "SessionEnd": [
       {
         "hooks": [

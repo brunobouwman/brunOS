@@ -1,0 +1,27 @@
+# Codex per-repo hook template — Phase A capture for Codex sessions.
+#
+# Drop into a project repo as `.codex/config.toml` to register a PreCompact
+# hook that captures the rollout transcript before context compaction.
+# Codex's per-turn `Stop` event is NOT used here — codex_watcher.py polls
+# rollout JSONLs every 5 min and dispatches a flush ~10 min after the file
+# goes idle, which acts as our SessionEnd equivalent. The watcher works
+# for ANY Codex session on this Mac regardless of per-repo config; this
+# file only adds the more-timely PreCompact snapshot.
+#
+# Replace <project> and <default-export> below (see README). The hook
+# command path is absolute (Bruno's Mac); on other hosts, edit the path
+# manually — `uv run` is intentionally avoided here because Codex hook
+# commands run with the EXTERNAL repo as cwd, and `uv run` would resolve
+# against that repo's pyproject.toml (which doesn't exist).
+#
+# After installing, run `/hooks` inside a Codex session in this repo to
+# review and TRUST the hook — Codex blocks non-managed commands until you
+# do this once per exact command string.
+
+[[hooks.PreCompact]]
+matcher = "manual|auto"
+
+[[hooks.PreCompact.hooks]]
+type = "command"
+command = "/Users/brunobouwman/Documents/claude-second-brain/.venv/bin/python /Users/brunobouwman/Documents/claude-second-brain/.claude/hooks/codex-precompact-flush.py --project=<project> --default-export=<default-export>"
+timeout = 30

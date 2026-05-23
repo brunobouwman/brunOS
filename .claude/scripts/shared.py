@@ -245,19 +245,39 @@ _GENERIC_PARENT_DIRS = {
 }
 
 
-def derive_project_slug() -> str | None:
-    """Auto-derive a flush-routing project slug from $CLAUDE_PROJECT_DIR.
+# Manual slug aliases — collapse auto-derived slugs onto one canonical slug so a
+# single repo never splits across two inbox folders. Applied at the end of every
+# auto-derivation path (Claude Code path-based + Codex canonical-path + Codex
+# worktree URL-basename). NOTE: Claude Code hooks that pass an explicit --project
+# bypass derivation entirely, so keep those flags pointed at the SAME canonical
+# value (lab-agent-chat-ui's hooks use --project=vertik-studio).
+_SLUG_ALIASES = {
+    "vertik-lab-agent-chat-ui": "vertik-studio",  # canonical-path derivation
+    "lab-agent-chat-ui": "vertik-studio",         # Codex worktree URL-basename fallback
+    "protostack-colinas": "colinas",              # canonical-path derivation
+    "memorial-colinas": "colinas",                # Codex worktree URL-basename fallback (repo = memorial-colinas.git)
+}
 
-    Returns None when the project dir is BrunOS itself (route to daily log)
-    or when the env var is missing/unreadable. Otherwise returns a slug of
+
+def canonicalize_slug(slug: str | None) -> str | None:
+    """Map an auto-derived slug onto its canonical alias, if one is defined."""
+    if slug is None:
+        return None
+    return _SLUG_ALIASES.get(slug, slug)
+
+
+def derive_project_slug_from_path(path: os.PathLike[str] | str | None) -> str | None:
+    """Auto-derive a project slug from an arbitrary directory path.
+
+    Returns None when the path is missing/unreadable or resolves to the
+    BrunOS repo itself (route to daily log). Otherwise returns a slug of
     the form `<parent>-<base>` when the parent isn't a generic wrapper dir,
     else just `<base>`. Matches the existing `vertik-lab-agent` convention.
     """
-    raw = os.environ.get("CLAUDE_PROJECT_DIR")
-    if not raw:
+    if not path:
         return None
     try:
-        project_dir = Path(raw).resolve()
+        project_dir = Path(path).resolve()
     except OSError:
         return None
     try:
@@ -270,8 +290,18 @@ def derive_project_slug() -> str | None:
         return None
     parent_name = project_dir.parent.name
     if parent_name and parent_name.lower() not in _GENERIC_PARENT_DIRS:
-        return _slug(f"{parent_name}-{base}")
-    return _slug(base)
+        return canonicalize_slug(_slug(f"{parent_name}-{base}"))
+    return canonicalize_slug(_slug(base))
+
+
+def derive_project_slug() -> str | None:
+    """Auto-derive a flush-routing project slug from $CLAUDE_PROJECT_DIR.
+
+    Thin wrapper over `derive_project_slug_from_path` for Claude Code hooks
+    that rely on the env var. Codex paths (watcher, backfill) call the
+    `_from_path` variant directly with `session_meta.cwd`.
+    """
+    return derive_project_slug_from_path(os.environ.get("CLAUDE_PROJECT_DIR"))
 
 
 def write_inbox_capture(
@@ -406,17 +436,23 @@ def dispatch_flush(
     *,
     project: str | None = None,
     default_export: str | None = None,
+    sync: bool = False,
 ) -> Path | None:
-    """Persist transcript JSON and Popen memory_flush.py detached via `uv run`.
+    """Persist transcript JSON and run memory_flush.py via `uv run`.
 
     Falls back to .venv/bin/python or sys.executable if uv is not on PATH.
-    Returns the transcript path on success; None if write failed.
+    Returns the kickoff transcript path on success; None if write failed.
 
     `project` and `default_export` are Phase A capture-routing metadata.
     When `project` is set (and not "brunos"), the flush is routed to
     Memory/_inbox/sessions/<project>/ instead of the daily log. The
     default_export tag rides along in the inbox file's frontmatter for
     Phase B reflection to consume.
+
+    `sync=False` (default): Popen detached so the hook returns immediately.
+    `sync=True`: subprocess.run waits to completion (used by the Codex
+    backfill so we serialize Anthropic calls instead of fanning out 30
+    concurrent processes).
     """
     import subprocess
     import sys
@@ -449,14 +485,24 @@ def dispatch_flush(
         cmd = [python_bin, str(flush_script), str(transcript_path)]
 
     try:
-        subprocess.Popen(
-            cmd,
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-            stdin=subprocess.DEVNULL,
-            start_new_session=True,
-            cwd=str(REPO_ROOT),
-        )
+        if sync:
+            subprocess.run(
+                cmd,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                stdin=subprocess.DEVNULL,
+                cwd=str(REPO_ROOT),
+                check=False,
+            )
+        else:
+            subprocess.Popen(
+                cmd,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                stdin=subprocess.DEVNULL,
+                start_new_session=True,
+                cwd=str(REPO_ROOT),
+            )
     except OSError:
         return transcript_path
     return transcript_path
