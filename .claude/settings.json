@@ -6,7 +6,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "uv run python .claude/hooks/session-start-context.py"
+            "command": "cd \"$CLAUDE_PROJECT_DIR\" && uv run python .claude/hooks/session-start-context.py"
           }
         ]
       }
@@ -17,7 +17,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "uv run python .claude/hooks/block-secrets.py"
+            "command": "cd \"$CLAUDE_PROJECT_DIR\" && uv run python .claude/hooks/block-secrets.py"
           }
         ]
       },
@@ -26,7 +26,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "uv run python .claude/hooks/dangerous-bash.py"
+            "command": "cd \"$CLAUDE_PROJECT_DIR\" && uv run python .claude/hooks/dangerous-bash.py"
           }
         ]
       },
@@ -35,7 +35,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "uv run python .claude/hooks/protect-soul.py"
+            "command": "cd \"$CLAUDE_PROJECT_DIR\" && uv run python .claude/hooks/protect-soul.py"
           }
         ]
       }
@@ -46,7 +46,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "uv run python .claude/hooks/pre-compact-flush.py"
+            "command": "cd \"$CLAUDE_PROJECT_DIR\" && uv run python .claude/hooks/pre-compact-flush.py"
           }
         ]
       }
@@ -56,7 +56,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "uv run python .claude/hooks/session-end-flush.py"
+            "command": "cd \"$CLAUDE_PROJECT_DIR\" && uv run python .claude/hooks/session-end-flush.py"
           }
         ]
       }

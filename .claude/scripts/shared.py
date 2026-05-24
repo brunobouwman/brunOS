@@ -250,10 +250,15 @@ _GENERIC_PARENT_DIRS = {
 # auto-derivation path (Claude Code path-based + Codex canonical-path + Codex
 # worktree URL-basename). NOTE: Claude Code hooks that pass an explicit --project
 # bypass derivation entirely, so keep those flags pointed at the SAME canonical
-# value (lab-agent-chat-ui's hooks use --project=vertik-studio).
+# value (both Vertik repos' hooks now use --project=vertik).
 _SLUG_ALIASES = {
-    "vertik-lab-agent-chat-ui": "vertik-studio",  # canonical-path derivation
-    "lab-agent-chat-ui": "vertik-studio",         # Codex worktree URL-basename fallback
+    # Vertik — lab-agent + lab-agent-chat-ui are one context: "vertik".
+    "vertik-lab-agent": "vertik",                 # canonical-path derivation (lab-agent)
+    "vertik-lab-agent-chat-ui": "vertik",         # canonical-path derivation (chat-ui)
+    "lab-agent": "vertik",                         # Codex worktree URL-basename fallback (lab-agent)
+    "lab-agent-chat-ui": "vertik",                 # Codex worktree URL-basename fallback (chat-ui)
+    "vertik-studio": "vertik",                     # retired prior canonical (pre-2026-05-24)
+    # Protostack / Memorial Colinas.
     "protostack-colinas": "colinas",              # canonical-path derivation
     "memorial-colinas": "colinas",                # Codex worktree URL-basename fallback (repo = memorial-colinas.git)
 }
