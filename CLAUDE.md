@@ -26,7 +26,7 @@ Phase 4 moved the env file from repo-root `.env` to `.claude/.env`. `shared.load
 - `Memory/drafts/{active,sent,expired}/` — draft lifecycle (`sent/` is the voice corpus).
 - `Memory/{meetings,projects,clients,research,goals,content,team,personal,news-digest}/`
 - `Memory/personal/` — PRD extension. `personal/finance.md` is OFF-LIMITS to the agent (matches SOUL.md "no financial data" boundary).
-- **Note**: `Memory/BOOTSTRAP.md` is absent by design — vault was bootstrapped manually 2026-05-01 (per `Memory/_README.md` line 41). Phase 2's SessionStart hook will not see it.
+- **Note**: `Memory/BOOTSTRAP.md` is absent by design — vault was bootstrapped manually 2026-05-01 (per `Memory/_README.md` § Migration status). Phase 2's SessionStart hook will not see it.
 
 ## Conventions
 
@@ -118,7 +118,7 @@ uv run python .claude/skills/weekly-review/scripts/aggregate_week.py [--week YYY
 
 # Heartbeat + reflection (Phase 6) — manual CLI; Phase 9 wires the scheduler:
 uv run python .claude/scripts/heartbeat.py [--dry-run] [--no-agent] [--force]
-uv run python .claude/scripts/memory_reflect.py [--dry-run]
+uv run python .claude/scripts/memory_reflect.py [--dry-run] [--inbox-only] [--skip-inbox] [--project <slug>]
 
 # Phase 7 — Slack chat bot:
 uv run python .claude/chat/bot.py --smoke-test     # connect + auth.test, exit 0
@@ -176,7 +176,18 @@ CLI flags: `--dry-run` (print stages + would-be agent prompt; skip SDK calls + v
 
 ### `memory_reflect.py` (daily 08:00 BRT in Phase 9, before heartbeat)
 
-Single Sonnet 4.6 call (`allowed_tools=[]`, `setting_sources=None`, `max_turns=1`). Reads yesterday's daily log + current MEMORY.md; emits JSON of `[{type, text, promote}]` per item; deterministic Python applies promotions to the right MEMORY.md section (decision → "Key durable decisions", lesson → "Lessons", fact → "Tax & financial structure", status → "Active projects"). If MEMORY.md > 5KB after append, a SECOND Sonnet call compacts older entries first (aborts apply if shrink > 50%). SOUL.md changes go to today's daily log under "## SUGGESTED SOUL CHANGES (REVIEW MANUALLY)" — never directly written. Idempotent via `.claude/data/state/last_reflection.json`.
+`memory_reflect.py` runs **two independent, idempotent stages** orchestrated by `_run()`; each has its own state file, so the inbox stage runs even when the daily-log stage short-circuits.
+
+**Daily-log stage** (`_run_daily_stage`): single Sonnet 4.6 call (`allowed_tools=[]`, `setting_sources=None`, `max_turns=1`). Reads yesterday's daily log + current MEMORY.md; emits JSON of `[{type, text, promote}]` per item; deterministic Python applies promotions to the right MEMORY.md section (decision → "Key durable decisions", lesson → "Lessons", fact → "Tax & financial structure", status → "Active projects"). If MEMORY.md > 5KB after append, a SECOND Sonnet call compacts older entries first (aborts apply if shrink > 50%). SOUL.md changes go to today's daily log under "## SUGGESTED SOUL CHANGES (REVIEW MANUALLY)" — never directly written. Idempotent via `.claude/data/state/last_reflection.json`.
+
+**Inbox stage / federation write-side** (`_run_inbox_stage`): drains the per-project session inboxes at `Memory/_inbox/sessions/<slug>/` (populated by the Phase A external-repo capture hooks). **One Sonnet call per project** with new captures (bounded by *projects touched*, not total projects), producing **three outputs per project**:
+1. **Personal consolidation** → durable personal items appended to MEMORY.md (same `_append_promotions` path + 5KB cap-guard as the daily stage).
+2. **Per-project continuity** → distilled bullets inserted under a machine-managed `## Auto-consolidated continuity` section in `projects/<slug>.md` (created with full frontmatter if absent; hand-written header preserved; capped to 8KB via the generalized `_compact_if_over_cap`). The `session-start-project.py` hook already loads `projects/<slug>.md` via `--context-file`, so this enriches the next session in that repo.
+3. **Strip-in-place + `share_status: cleared`** → each capture is rewritten with personal-life asides removed and stamped `share_status: cleared` in frontmatter (work/technical content preserved verbatim). This is the **privacy boundary as a flag** — a downstream company brain (LinOS now, VertikOS later) reading the same gitignored, per-company inbox sees only work-scoped, cleared content. Captures are **never deleted or moved** (retirement is a separate, deferred VPS-side job). External capture bodies enter the prompt via `sanitize.wrap_external`.
+
+Idempotent via a **per-project watermark** in `.claude/data/state/inbox_reflection.json` (`{"<slug>": "<newest created processed>"}`); only captures with `created > watermark` AND `share_status != cleared` are processed, so re-run is a no-op. CLI: `--inbox-only` (skip daily stage), `--skip-inbox` (legacy daily-only), `--project <slug>` (limit to one inbox); `--dry-run` prints per-project parsed JSON (personal items + continuity + would-clear captures) and writes nothing / advances no watermark.
+
+**Federation model — no `_shared/` staging.** This supersedes the earlier curated-shared-folder design: with per-company inboxes (LinOS reads only `linos-protostack`-tagged inboxes like `colinas/`; VertikOS would read only `vertik`; neither touches personal-only inboxes) plus strip-in-place, the capture *is* the shared artifact and `share_status: cleared` is the gate. `default_export` is preserved as metadata, never used to route — the inbox stage has **no write path outside the BrunOS vault**; the company brain reads the inbox itself. **Deferred (need LinOS-as-agent, Phase C.5):** rsync transport (Mac→VPS `-a --update`, never `--delete`, so cleaned VPS copies aren't clobbered), the VPS retirement/deletion job (`BrunOS-processed AND LinOS-acked ELSE 15-day fallback`), and the LinOS consumer + ack manifest. No brain writes/deletes inside another.
 
 `protect-soul.py` (PreToolUse `Edit|Write`) is belt-and-suspenders: it blocks `BrunOS/Memory/SOUL.md` edits when `CLAUDE_INVOKED_BY=reflection`. Reflection itself uses no tools, so the hook is defensive against future agent surfaces.
 
