@@ -1,0 +1,9 @@
+# Lets the code-sync unit (runs as `bruno`) recycle the slackbot daemon when a
+# pull changes its in-process code. Scoped to exactly one command on exactly one
+# unit — no broader systemctl access.
+#
+# Install (validated):
+#   sudo install -m 0440 -o root -g root \
+#     deploy/sudoers/brunoosbrain-codesync /etc/sudoers.d/brunoosbrain-codesync
+#   sudo visudo -cf /etc/sudoers.d/brunoosbrain-codesync
+bruno ALL=(root) NOPASSWD: /usr/bin/systemctl try-restart brunoosbrain-slackbot.service
