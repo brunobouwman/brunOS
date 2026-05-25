@@ -1,0 +1,11 @@
+[Unit]
+Description=brunoosbrain Slack bot weekly recycle (backstop against SDK-subprocess memory creep)
+# Restart only if the bot is actually running — no-op on a stopped/failed unit.
+After=brunoosbrain-slackbot.service
+
+[Service]
+Type=oneshot
+# Runs as root (no User=) so it can act on the system slackbot unit.
+# Graceful: SIGTERM triggers the bot's close_all(), which flushes every live
+# thread to memory before the subprocesses are torn down.
+ExecStart=/usr/bin/systemctl try-restart brunoosbrain-slackbot.service

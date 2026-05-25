@@ -51,6 +51,9 @@ DEDUP_WINDOW_S = 60
 MIN_TRANSCRIPT_BYTES = 2048
 MAX_INPUT_CHARS = 200_000
 LAST_FLUSH_PATH = STATE_DIR / "last_flush.json"
+# Per-session line watermark for incremental (chat-resume) flushes — see
+# _slice_incremental. Distinct from LAST_FLUSH_PATH (60s dedup timestamps).
+FLUSH_OFFSETS_PATH = STATE_DIR / "flush_offsets.json"
 
 SYSTEM_PROMPT = """You distil an agent session transcript (Claude Code or Codex) \
 into durable memory for BrunOS. Output only what is worth remembering across \
@@ -94,6 +97,18 @@ def _record_flush(session_id: str) -> None:
     state[session_id] = _ts_brt()
     state = trim_dedup_entries(state, max_age_days=1)
     save_state(LAST_FLUSH_PATH, state)
+
+
+def _load_offset(session_id: str) -> int:
+    state = load_state(FLUSH_OFFSETS_PATH, default={}) or {}
+    v = state.get(session_id)
+    return v if isinstance(v, int) and v >= 0 else 0
+
+
+def _record_offset(session_id: str, total_lines: int) -> None:
+    state = load_state(FLUSH_OFFSETS_PATH, default={}) or {}
+    state[session_id] = total_lines
+    save_state(FLUSH_OFFSETS_PATH, state)
 
 
 def _extract_text(msg) -> str:
@@ -201,10 +216,27 @@ def main(argv: list[str]) -> int:
 
     transcript_ref = kickoff.get("transcript_path")
     origin = (kickoff.get("_origin") or "claude-code").strip().lower()
+    # Incremental flush (chat resume): the same session_id is reaped repeatedly
+    # against one ever-growing JSONL. Distil only lines past the watermark so the
+    # daily log doesn't re-accumulate earlier bullets. JSONL-line based, so it
+    # only applies to the claude-code origin (codex uses a parsed stream).
+    incremental = bool(kickoff.get("_incremental")) and origin == "claude-code"
     transcript_text = (
         _load_session_transcript(transcript_ref, origin) if transcript_ref else None
     )
-    if transcript_text is None or len(transcript_text) < MIN_TRANSCRIPT_BYTES:
+    if transcript_text is None:
+        _unlink(kickoff_path)
+        return 0
+
+    new_offset: int | None = None
+    if incremental:
+        lines = transcript_text.splitlines()
+        new_offset = len(lines)
+        transcript_text = "\n".join(lines[_load_offset(session_id):])
+
+    if len(transcript_text) < MIN_TRANSCRIPT_BYTES:
+        # Too little NEW content to justify a Sonnet call; leave the watermark so
+        # the tail accumulates and gets flushed once it's substantial.
         _unlink(kickoff_path)
         return 0
 
@@ -219,6 +251,8 @@ def main(argv: list[str]) -> int:
 
     if not output or output.strip() == "FLUSH_OK":
         _record_flush(session_id)
+        if new_offset is not None:
+            _record_offset(session_id, new_offset)
         _unlink(kickoff_path)
         return 0
 
@@ -244,6 +278,8 @@ def main(argv: list[str]) -> int:
         return 0
 
     _record_flush(session_id)
+    if new_offset is not None:
+        _record_offset(session_id, new_offset)
     _unlink(kickoff_path)
     return 0
 

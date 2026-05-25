@@ -1,0 +1,10 @@
+[Unit]
+Description=brunoosbrain Slack bot weekly recycle — Sunday 04:00 BRT (low traffic)
+
+[Timer]
+OnCalendar=Sun *-*-* 04:00 America/Sao_Paulo
+Persistent=false
+Unit=brunoosbrain-slackbot-restart.service
+
+[Install]
+WantedBy=timers.target

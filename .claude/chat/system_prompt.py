@@ -66,11 +66,19 @@ interpretation), news-digest, weekly-review.
 """
 
 
-def _load_hook_module() -> ModuleType:
-    """Load .claude/hooks/session-start-context.py by file path.
+_hook_module: ModuleType | None = None
 
-    The hyphenated filename can't be a regular import target.
+
+def _load_hook_module() -> ModuleType:
+    """Load .claude/hooks/session-start-context.py by file path (cached).
+
+    The hyphenated filename can't be a regular import target. The module is
+    cached so rebuilding the system prompt per session only re-reads the vault
+    files (via build_context()), not re-execs the hook module.
     """
+    global _hook_module
+    if _hook_module is not None:
+        return _hook_module
     spec = importlib.util.spec_from_file_location(
         "session_start_context", _HOOK_PATH
     )
@@ -78,6 +86,7 @@ def _load_hook_module() -> ModuleType:
         raise RuntimeError(f"failed to load hook spec from {_HOOK_PATH}")
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
+    _hook_module = module
     return module
 
 

@@ -5,11 +5,14 @@ Reads (in order): SOUL.md, USER.md, MEMORY.md, last 3 daily logs, HEARTBEAT.md, 
 Falls through to BOOTSTRAP.md if it exists.
 
 Skipped when CLAUDE_INVOKED_BY ∈ {reflection, news-digest, weekly-review,
-memory_flush} — those scripts compose their own minimal context and don't
+memory_flush, chat} — those scripts compose their own minimal context and don't
 benefit from the full vault dump (and reflection in particular suffers from
 double-loading MEMORY.md when the hook fires on top of its already-included
-input). Heartbeat AGENT sessions DO want the context (loaded via
-setting_sources=["project"]) so we don't skip "heartbeat".
+input). The Slack chat bot ("chat") bakes the full vault block into its
+system prompt (rebuilt fresh per session) AND its >cap dump would spill to a
+file here — so the hook copy is a redundant truncation notice that tells the
+bot to Read a file it already has; skip it. Heartbeat AGENT sessions DO want
+the context (loaded via setting_sources=["project"]) so we don't skip "heartbeat".
 
 Fails open: any unexpected exception writes to stderr and exits 0.
 """
@@ -88,7 +91,7 @@ def build_context() -> str:
     return "\n".join(parts)
 
 
-_SKIP_FOR = {"reflection", "guardrail", "news-digest", "weekly-review", "memory_flush"}
+_SKIP_FOR = {"reflection", "guardrail", "news-digest", "weekly-review", "memory_flush", "chat"}
 
 
 def main() -> int:

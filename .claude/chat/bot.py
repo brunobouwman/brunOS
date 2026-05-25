@@ -56,21 +56,30 @@ def _persist_bot_user_id(bot_user_id: str) -> None:
     save_state(SLACK_STATE_PATH, state)
 
 
-def _build_options_factory(system_prompt: str):
+def _build_options_factory(system_prompt_builder):
     """Return a factory that yields a fresh ClaudeAgentOptions per session.
 
-    The system prompt is built ONCE at startup (vault file reads are expensive)
-    and reused for every per-thread session — daemon restart refreshes it.
+    The system prompt (which carries the vault context) is REBUILT per session
+    via `system_prompt_builder()` — the SessionStart hook is skipped for chat
+    (CLAUDE_INVOKED_BY=chat), so this is the sole, always-fresh source of vault
+    context. Rebuilding is ~6 cheap vault reads (hook module is cached), so a
+    week-long daemon never serves stale MEMORY/daily-log context.
+
+    Accepts an optional `resume` SDK session_id so a reaped/restarted thread
+    continues its prior conversation instead of starting fresh. `fork_session`
+    stays False so resume keeps the same session_id (and transcript file).
     """
     from claude_agent_sdk import ClaudeAgentOptions
 
-    def _factory() -> ClaudeAgentOptions:
+    def _factory(resume: str | None = None) -> ClaudeAgentOptions:
         return ClaudeAgentOptions(
             allowed_tools=["Read", "Write", "Edit", "Bash"],
             setting_sources=["project"],
-            system_prompt=system_prompt,
+            system_prompt=system_prompt_builder(),
             model=CHAT_MODEL,
             max_turns=MAX_TURNS,
+            resume=resume,
+            fork_session=False,
         )
 
     return _factory
@@ -119,11 +128,15 @@ async def main_async(smoke_test: bool) -> int:
     _persist_bot_user_id(bot_user_id)
     _log(f"[chat] bot started: bot_user_id={bot_user_id} team={auth.get('team')}")
 
-    system_prompt = build_chat_system_prompt()
-    _log(f"[chat] system prompt built: {len(system_prompt)} chars")
+    # Build once at startup to validate + log size; the factory rebuilds it
+    # fresh per session so a long-running daemon never serves stale context.
+    _log(
+        f"[chat] system prompt builds at {len(build_chat_system_prompt())} chars "
+        f"(rebuilt fresh per session)"
+    )
 
     session_manager = SessionManager(
-        options_factory=_build_options_factory(system_prompt),
+        options_factory=_build_options_factory(build_chat_system_prompt),
         db_path=CHAT_DB_PATH,
     )
     register(app, bot_user_id, session_manager)
@@ -143,10 +156,16 @@ async def main_async(smoke_test: bool) -> int:
 
     await handler.connect_async()
     _log("[chat] socket mode connected; waiting for DMs")
+    reaper_task = asyncio.create_task(session_manager.run_reaper(shutdown_event))
     try:
         await shutdown_event.wait()
     finally:
         _log("[chat] shutting down")
+        reaper_task.cancel()
+        try:
+            await reaper_task
+        except (asyncio.CancelledError, Exception):
+            pass
         try:
             await session_manager.close_all()
         except Exception as e:

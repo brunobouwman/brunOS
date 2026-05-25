@@ -18,7 +18,6 @@ Self-echo filter mirrors integrations.slack._filter_msg — keep them in lockste
 
 from __future__ import annotations
 
-import asyncio
 import re
 import sys
 from pathlib import Path
@@ -117,29 +116,27 @@ def _strip_bot_mention(text: str, bot_user_id: str) -> str:
 
 def register(app, bot_user_id: str, session_manager: SessionManager) -> None:
     """Wire DM and @mention events to the SDK round-trip."""
-    thread_locks: dict[str, asyncio.Lock] = {}
-
-    def _lock_for(session_key: str) -> asyncio.Lock:
-        lock = thread_locks.get(session_key)
-        if lock is None:
-            lock = asyncio.Lock()
-            thread_locks[session_key] = lock
-        return lock
 
     async def _route(event: dict, say, user_text: str, *, surface: str) -> None:
         session_key = _derive_session_key(event)
         slack_thread_ts = _derive_slack_thread_ts(event)
-        async with _lock_for(session_key):
+        # Lock is owned by the SessionManager so the idle reaper never closes a
+        # client mid-request.
+        async with session_manager.lock_for(session_key):
             try:
                 client = await session_manager.get_or_create(session_key)
                 await client.query(user_text)
                 parts: list[str] = []
+                session_id: str | None = None
                 async for sdk_msg in client.receive_response():
+                    session_id = getattr(sdk_msg, "session_id", None) or session_id
                     text = _extract_text(sdk_msg)
                     if text:
                         parts.append(text)
+                session_manager.note_session_id(session_key, session_id)
                 reply = "".join(parts).strip() or "(no response)"
                 await say(text=reply, thread_ts=slack_thread_ts)
+                session_manager.touch(session_key)
             except Exception as e:
                 _log(
                     f"[chat] {surface} handler failed for {session_key}: "
