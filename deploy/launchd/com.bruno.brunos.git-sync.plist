@@ -11,12 +11,20 @@
     <key>RunAtLoad</key>
     <true/>
 
+    <!-- Run via uv (holds Full Disk Access, granted for codex-watcher) so launchd
+         can reach the ~/Documents-resident vault despite macOS TCC. WorkingDirectory
+         is the repo (uv finds pyproject there); the shim cd's git-sync into the
+         vault itself. A direct /usr/local/bin/git-sync exec hits "Operation not
+         permitted" on the vault. -->
     <key>WorkingDirectory</key>
-    <string>/Users/brunobouwman/Documents/claude-second-brain/BrunOS</string>
+    <string>/Users/brunobouwman/Documents/claude-second-brain</string>
 
     <key>ProgramArguments</key>
     <array>
-        <string>/usr/local/bin/git-sync</string>
+        <string>/Users/brunobouwman/.local/bin/uv</string>
+        <string>run</string>
+        <string>python</string>
+        <string>deploy/bin/git_sync.py</string>
     </array>
 
     <key>EnvironmentVariables</key>

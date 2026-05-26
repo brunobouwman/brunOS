@@ -1,0 +1,50 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.bruno.brunos.inbox-rsync</string>
+
+    <!-- Mac → VPS one-way push of the gitignored Memory/_inbox/ captures so the
+         VPS daily reflection (inbox stage) can drain them. git-sync carries the
+         refined outputs back. Enabled on the Mac (capture origin); the VPS does
+         not run this. -->
+    <key>Disabled</key>
+    <false/>
+
+    <key>RunAtLoad</key>
+    <true/>
+
+    <key>WorkingDirectory</key>
+    <string>/Users/brunobouwman/Documents/claude-second-brain</string>
+
+    <!-- Run via uv (which holds Full Disk Access, granted for codex-watcher) so
+         launchd can read the ~/Documents-resident vault despite macOS TCC. A
+         /bin/bash entrypoint hits "Operation not permitted" here. -->
+    <key>ProgramArguments</key>
+    <array>
+        <string>/Users/brunobouwman/.local/bin/uv</string>
+        <string>run</string>
+        <string>python</string>
+        <string>deploy/bin/sync_inbox.py</string>
+    </array>
+
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>TZ</key>
+        <string>America/Sao_Paulo</string>
+        <key>PATH</key>
+        <string>/usr/local/bin:/opt/homebrew/bin:/usr/bin:/bin</string>
+    </dict>
+
+    <key>StandardOutPath</key>
+    <string>/Users/brunobouwman/Library/Logs/com.bruno.brunos.inbox-rsync.log</string>
+    <key>StandardErrorPath</key>
+    <string>/Users/brunobouwman/Library/Logs/com.bruno.brunos.inbox-rsync.log</string>
+
+    <!-- Hourly when the Mac is awake; eventual-consistency is fine (captures
+         that miss an 08:00 reflect are drained the next day). -->
+    <key>StartInterval</key>
+    <integer>3600</integer>
+</dict>
+</plist>
