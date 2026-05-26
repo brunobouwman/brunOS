@@ -187,7 +187,7 @@ CLI flags: `--dry-run` (print stages + would-be agent prompt; skip SDK calls + v
 
 Idempotent via a **per-project watermark** in `.claude/data/state/inbox_reflection.json` (`{"<slug>": "<newest created processed>"}`); only captures with `created > watermark` AND `share_status != cleared` are processed, so re-run is a no-op. CLI: `--inbox-only` (skip daily stage), `--skip-inbox` (legacy daily-only), `--project <slug>` (limit to one inbox); `--dry-run` prints per-project parsed JSON (personal items + continuity + would-clear captures) and writes nothing / advances no watermark.
 
-**Federation model — no `_shared/` staging.** This supersedes the earlier curated-shared-folder design: with per-company inboxes (LinOS reads only `linos-protostack`-tagged inboxes like `colinas/`; VertikOS would read only `vertik`; neither touches personal-only inboxes) plus strip-in-place, the capture *is* the shared artifact and `share_status: cleared` is the gate. `default_export` is preserved as metadata, never used to route — the inbox stage has **no write path outside the BrunOS vault**; the company brain reads the inbox itself. **Deferred (need LinOS-as-agent, Phase C.5):** rsync transport (Mac→VPS `-a --update`, never `--delete`, so cleaned VPS copies aren't clobbered), the VPS retirement/deletion job (`BrunOS-processed AND LinOS-acked ELSE 15-day fallback`), and the LinOS consumer + ack manifest. No brain writes/deletes inside another.
+**Federation model — no `_shared/` staging.** This supersedes the earlier curated-shared-folder design: with per-company inboxes (LinOS reads only `linos-protostack`-tagged inboxes like `colinas/`; VertikOS would read only `vertik`; neither touches personal-only inboxes) plus strip-in-place, the capture *is* the shared artifact and `share_status: cleared` is the gate. `default_export` is preserved as metadata, never used to route — the inbox stage has **no write path outside the BrunOS vault**; the company brain reads the inbox itself. **Mac→VPS inbox transport — LIVE (2026-05-26)** via `deploy/bin/sync_inbox.py` + the `com.bruno.brunos.inbox-rsync` launchd unit: `_inbox/` is gitignored so git-sync never carries it; captures originate on the Mac (external-repo hooks) and rsync (`-a --update`, never `--delete`) one-way to the VPS, where the **VPS-side** reflection inbox stage processes them — reflection stays VPS-only. `--update` means a capture the VPS has already stripped + `cleared` (newer mtime) is never clobbered by the Mac's older original. Refined outputs (MEMORY.md personal items + `projects/<slug>.md` continuity) flow BACK to the Mac via the normal vault git-sync. **Still deferred (need LinOS-as-agent, Phase C.5):** the VPS retirement/deletion job (`BrunOS-processed AND LinOS-acked ELSE 15-day fallback`) and the LinOS consumer + ack manifest. No brain writes/deletes inside another.
 
 `protect-soul.py` (PreToolUse `Edit|Write`) is belt-and-suspenders: it blocks `BrunOS/Memory/SOUL.md` edits when `CLAUDE_INVOKED_BY=reflection`. Reflection itself uses no tools, so the hook is defensive against future agent surfaces.
 
@@ -244,7 +244,7 @@ Two-host deployment: a **Hetzner CX21 ARM64 droplet at `49.13.165.23`, shared wi
 ### Host shape
 
 - **VPS**: shared with Lisa. Bruno's namespace = user `bruno`, services `brunoosbrain-*`, log dir `/var/log/brunoosbrain/`, repo `/home/bruno/claude-second-brain`, vault `/home/bruno/BrunOS`. Lisa's namespace = `lisa` / `lisaosbrain-*` — never touch.
-- **Mac**: failover-ready. Plists live at `~/Library/LaunchAgents/com.bruno.brunos.<svc>.plist`, all `Disabled=true` except `git-sync` (read consumer, dual-run safe).
+- **Mac**: failover-ready. Plists live at `~/Library/LaunchAgents/com.bruno.brunos.<svc>.plist`, all `Disabled=true` except `git-sync` and `inbox-rsync` (both dual-run safe). **macOS TCC gotcha:** the repo+vault sit under `~/Documents`, which a launchd agent can't read when it execs `/bin/bash` or a binary directly (`Operation not permitted`, exit 126). Both enabled units therefore run via `uv run python <shim>` (`git_sync.py`, `sync_inbox.py`); `~/.local/bin/uv` holds Full Disk Access (granted for codex-watcher) and it inherits to the git/rsync children. Any new Mac launchd unit must do the same.
 - **uv path**: `/usr/local/bin/uv` on VPS (system-wide, Lisa's bootstrap); `/Users/brunobouwman/.local/bin/uv` on Mac (per-user). Don't conflate.
 
 ### Deploy artifacts (`deploy/`)
@@ -252,8 +252,8 @@ Two-host deployment: a **Hetzner CX21 ARM64 droplet at `49.13.165.23`, shared wi
 ```
 deploy/
   README.md                          operator runbook (read this first)
-  bin/                               idempotent helpers (seed/bootstrap/sync/install/merge-driver)
-  launchd/com.bruno.brunos.*.plist   6 Mac plists (Disabled=true except git-sync)
+  bin/                               idempotent helpers (seed/bootstrap/sync/install/merge-driver) + git_sync.py / sync_inbox.py (uv launchd shims, TCC workaround)
+  launchd/com.bruno.brunos.*.plist   7 Mac plists (Disabled=true except git-sync + inbox-rsync; both run via uv shims)
   systemd/brunoosbrain-*             8 services + 7 timers (slackbot daemon has no timer; slackbot-restart is a weekly recycle timer)
   vault/{gitignore,gitattributes}    templates copied to BrunOS/.gitignore + .gitattributes at vault git-init
 setup.sh                             repo-root idempotent venv bootstrap (uv sync)
@@ -261,7 +261,7 @@ setup.sh                             repo-root idempotent venv bootstrap (uv syn
 
 ### Vault git-sync + concat-both merge driver
 
-Vault is a separate private GitHub repo (`brunobouwman/brunos-vault`). VPS+Mac both run `git-sync` (simonthum) every 2 min. `Memory/daily/*.md` and `Memory/HABITS.md` use the `concat-both` merge driver (`deploy/bin/git-merge-concat`) so simultaneous appends from both hosts survive merge — at the cost of line order (driver sorts to compute the diff). The driver registration is per-clone (`deploy/bin/install-merge-driver.sh` runs `git config merge.concat-both.driver` inside the vault repo on each host). Sensitive paths excluded from the vault repo: `Memory/drafts/active/*` (recipient context), `Memory/personal/finance.md` (SOUL.md no-financial-data boundary), `.DS_Store`, `.obsidian/workspace*`, `.obsidian/cache`.
+Vault is a separate private GitHub repo (`brunobouwman/brunos-vault`). VPS+Mac both run `git-sync` (simonthum) every 2 min (the Mac via the `git_sync.py` uv shim — see the Host shape TCC note; Mac git-sync went live 2026-05-26, previously never ran). `Memory/daily/*.md` and `Memory/HABITS.md` use the `concat-both` merge driver (`deploy/bin/git-merge-concat`) so simultaneous appends from both hosts survive merge — at the cost of line order (driver sorts to compute the diff). The driver registration is per-clone (`deploy/bin/install-merge-driver.sh` runs `git config merge.concat-both.driver` inside the vault repo on each host). Sensitive paths excluded from the vault repo: `Memory/drafts/active/*` (recipient context), `Memory/personal/finance.md` (SOUL.md no-financial-data boundary), `.DS_Store`, `.obsidian/workspace*`, `.obsidian/cache`.
 
 ### Single-instance policy
 
