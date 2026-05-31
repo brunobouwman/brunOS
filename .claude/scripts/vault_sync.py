@@ -45,12 +45,8 @@ import os
 os.environ.setdefault("CLAUDE_INVOKED_BY", "vault-sync")
 
 import argparse  # noqa: E402
-import fcntl  # noqa: E402
-import socket  # noqa: E402
 import subprocess  # noqa: E402
 import sys  # noqa: E402
-import urllib.request  # noqa: E402
-from datetime import datetime  # noqa: E402
 from pathlib import Path  # noqa: E402
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
@@ -60,10 +56,22 @@ from shared import (  # noqa: E402
     STATE_DIR,
     _ts_brt,
     load_env,
-    load_state,
-    now_brt,
-    save_state,
     vault_path,
+)
+
+# All git helpers + the status-file / Slack-alert / healthcheck / run-lock
+# runtime now live in sync_common, shared verbatim with code_sync, so the two
+# syncs' observability can't drift. vault_sync keeps only its vault-specific
+# transaction logic (concat-both preflight, merge-or-abort, push-retry).
+from sync_common import (  # noqa: E402
+    NET_TIMEOUT,
+    GitError,
+    SyncReporter,
+    count as _count,
+    git as _git,
+    git_ok as _git_ok,
+    host_label as _host_label,
+    is_push_reject as _is_push_reject,
 )
 
 # --------------------------------------------------------------------------- #
@@ -74,26 +82,23 @@ LOCK_FILE = STATE_DIR / "locks" / "vault-sync.run.lock"
 MERGE_DRIVER = REPO_ROOT / "deploy" / "bin" / "git-merge-concat"
 REMOTE = "origin"
 BRANCH = "main"
-NET_TIMEOUT = 90  # seconds for fetch / push
-ALERT_REPEAT_SECONDS = 3600  # while failing, re-alert at most hourly
-SCHEMA_VERSION = 1
-LOG_PREFIX = "[vault-sync]"
+
+REPORTER = SyncReporter(
+    service="vault-sync",
+    status_file=STATE_FILE,
+    lock_file=LOCK_FILE,
+    healthcheck_env="BRUNOS_HEALTHCHECK_URL",
+)
+
+# Status-file + alert + healthcheck + lock all route through REPORTER; the
+# free-function names below stay as thin shims so the rest of this module (and
+# its test suite) reads unchanged after the migration.
+_log = REPORTER.log
 
 
 # --------------------------------------------------------------------------- #
 # Errors
 # --------------------------------------------------------------------------- #
-class GitError(Exception):
-    """A git subprocess returned non-zero."""
-
-    def __init__(self, cmd: str, cp: subprocess.CompletedProcess):
-        self.cmd = cmd
-        self.cp = cp
-        tail = (cp.stderr or cp.stdout or "").strip().splitlines()
-        msg = tail[-1] if tail else "(no output)"
-        super().__init__(f"git {cmd} failed (rc={cp.returncode}): {msg}")
-
-
 class SyncConflict(Exception):
     """A merge produced real (non-append-only) conflicts; tree was aborted clean."""
 
@@ -101,94 +106,6 @@ class SyncConflict(Exception):
         self.paths = paths
         self.detail = detail
         super().__init__(f"unresolved conflict on: {', '.join(paths) or '(unknown)'}")
-
-
-# --------------------------------------------------------------------------- #
-# Small helpers
-# --------------------------------------------------------------------------- #
-def _log(msg: str) -> None:
-    print(f"{LOG_PREFIX} {msg}", flush=True)
-
-
-def _host_label() -> str:
-    lbl = os.environ.get("BRUNOS_SYNC_HOST_LABEL", "").strip()
-    if lbl:
-        return lbl
-    return (socket.gethostname() or "unknown").split(".")[0]
-
-
-def _git(cwd: Path, *args: str, timeout: float | None = None) -> subprocess.CompletedProcess:
-    return subprocess.run(
-        ["git", *args],
-        cwd=str(cwd),
-        capture_output=True,
-        text=True,
-        timeout=timeout,
-    )
-
-
-def _git_ok(cwd: Path, *args: str, timeout: float | None = None) -> str:
-    cp = _git(cwd, *args, timeout=timeout)
-    if cp.returncode != 0:
-        raise GitError(" ".join(args), cp)
-    return cp.stdout.strip()
-
-
-def _count(cwd: Path, rng: str) -> int:
-    out = _git_ok(cwd, "rev-list", "--count", rng)
-    return int(out or "0")
-
-
-def _is_push_reject(cp: subprocess.CompletedProcess) -> bool:
-    blob = f"{cp.stdout}\n{cp.stderr}".lower()
-    return any(
-        s in blob
-        for s in ("rejected", "non-fast-forward", "fetch first", "updates were rejected")
-    )
-
-
-def _older_than(ts_str: str | None, seconds: float) -> bool:
-    """True if ts_str is None or older than `seconds` ago."""
-    if not ts_str:
-        return True
-    try:
-        then = datetime.fromisoformat(ts_str)
-    except ValueError:
-        return True
-    return (now_brt() - then).total_seconds() > seconds
-
-
-# --------------------------------------------------------------------------- #
-# Observability
-# --------------------------------------------------------------------------- #
-def _send_alert(text: str) -> bool:
-    """Post an alert to the ops Slack channel. Never raises; returns success."""
-    _log(f"ALERT: {text.splitlines()[0]}")
-    channel = os.environ.get("BRUNOS_ALERT_CHANNEL", "").strip()
-    if not channel:
-        _log("ALERT: BRUNOS_ALERT_CHANNEL unset — skipping Slack send")
-        return False
-    try:
-        from integrations import slack
-
-        client = slack._client()
-        slack.send_message(client, channel=channel, text=text)
-        return True
-    except Exception as e:  # noqa: BLE001 — alerting must never crash the sync
-        _log(f"ALERT: Slack send failed: {type(e).__name__}: {e}")
-        return False
-
-
-def _healthcheck(success: bool) -> None:
-    """Ping the healthchecks.io dead-man's-switch. Never raises."""
-    url = os.environ.get("BRUNOS_HEALTHCHECK_URL", "").strip()
-    if not url:
-        return
-    target = url if success else url.rstrip("/") + "/fail"
-    try:
-        urllib.request.urlopen(target, timeout=10)  # noqa: S310 — fixed trusted URL
-    except Exception as e:  # noqa: BLE001
-        _log(f"healthcheck ping ({'ok' if success else 'fail'}) failed: {type(e).__name__}")
 
 
 # --------------------------------------------------------------------------- #
@@ -292,62 +209,11 @@ def sync(vault: Path, *, dry_run: bool) -> dict:
 
 
 # --------------------------------------------------------------------------- #
-# State + run orchestration
+# Run orchestration (status / alert / healthcheck / lock via REPORTER)
 # --------------------------------------------------------------------------- #
-def _record_success(state: dict, vault: Path, attempt_ts: str) -> None:
-    state.update(
-        {
-            "_schema_version": SCHEMA_VERSION,
-            "host": _host_label(),
-            "last_success": _ts_brt(),
-            "last_attempt": attempt_ts,
-            "last_error": None,
-            "behind": _count(vault, f"HEAD..{REMOTE}/{BRANCH}"),
-            "ahead": _count(vault, f"{REMOTE}/{BRANCH}..HEAD"),
-            "consecutive_failures": 0,
-        }
-    )
-    save_state(STATE_FILE, state)
-
-
-def _record_failure(
-    state: dict, attempt_ts: str, kind: str, msg: str, paths: list[str] | None
-) -> None:
-    fails = int(state.get("consecutive_failures", 0)) + 1
-    sig = f"{kind}:{','.join(paths) if paths else ''}"
-    last_sig = (state.get("last_error") or {}).get("signature")
-    last_alert = state.get("last_alert_ts")
-
-    state.update(
-        {
-            "_schema_version": SCHEMA_VERSION,
-            "host": _host_label(),
-            "last_attempt": attempt_ts,
-            "last_error": {
-                "type": kind,
-                "msg": msg,
-                "paths": paths or [],
-                "signature": sig,
-                "ts": attempt_ts,
-            },
-            "consecutive_failures": fails,
-        }
-    )
-
-    # Rate-limited: alert on the first failure, on a changed error signature, or
-    # at most hourly while a failure persists — so a stuck sync can't spam Slack
-    # every 2 minutes.
-    if fails == 1 or sig != last_sig or _older_than(last_alert, ALERT_REPEAT_SECONDS):
-        host = _host_label()
-        if _send_alert(f"⚠ vault sync FAILED on {host} [{kind}] (failure #{fails})\n{msg}"):
-            state["last_alert_ts"] = _ts_brt()
-
-    save_state(STATE_FILE, state)
-
-
 def _run(dry_run: bool) -> int:
     vault = vault_path()
-    state = load_state(STATE_FILE, default={}) or {}
+    state = REPORTER.load()
     attempt_ts = _ts_brt()
 
     try:
@@ -357,51 +223,35 @@ def _run(dry_run: bool) -> int:
         msg = f"unresolved merge conflict on: {', '.join(e.paths) or '(unknown)'} — manual merge needed (tree left clean, retrying)"
         _log(f"FAIL [conflict] {msg}")
         if not dry_run:
-            _record_failure(state, attempt_ts, "conflict", msg, e.paths)
-            _healthcheck(success=False)
+            REPORTER.record_failure(state, attempt_ts, "conflict", msg, e.paths)
         return 1
     except subprocess.TimeoutExpired as e:
         msg = f"git network op timed out after {e.timeout:.0f}s"
         _log(f"FAIL [timeout] {msg}")
         if not dry_run:
-            _record_failure(state, attempt_ts, "timeout", msg, None)
-            _healthcheck(success=False)
+            REPORTER.record_failure(state, attempt_ts, "timeout", msg)
         return 1
-    except (GitError, Exception) as e:  # noqa: BLE001 — any failure → loud + clean
+    except Exception as e:  # noqa: BLE001 — any failure → loud + clean
         kind = "git" if isinstance(e, GitError) else type(e).__name__
         _log(f"FAIL [{kind}] {e}")
         if not dry_run:
-            _record_failure(state, attempt_ts, kind, str(e), None)
-            _healthcheck(success=False)
+            REPORTER.record_failure(state, attempt_ts, kind, str(e))
         return 1
 
     if dry_run:
         _log(f"DRY ok: would pull {result['pulled']} / push {result['pushed']}")
         return 0
 
-    _record_success(state, vault, attempt_ts)
-    _healthcheck(success=True)
+    REPORTER.record_success(
+        state,
+        attempt_ts,
+        extra={
+            "behind": _count(vault, f"HEAD..{REMOTE}/{BRANCH}"),
+            "ahead": _count(vault, f"{REMOTE}/{BRANCH}..HEAD"),
+        },
+    )
     _log(f"ok (pulled {result['pulled']}, pushed {result['pushed']})")
     return 0
-
-
-def _try_lock() -> int | None:
-    """Non-blocking exclusive lock so overlapping ticks don't stack up."""
-    LOCK_FILE.parent.mkdir(parents=True, exist_ok=True)
-    fd = os.open(LOCK_FILE, os.O_RDWR | os.O_CREAT, 0o644)
-    try:
-        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
-        return fd
-    except OSError:
-        os.close(fd)
-        return None
-
-
-def _unlock(fd: int) -> None:
-    try:
-        fcntl.flock(fd, fcntl.LOCK_UN)
-    finally:
-        os.close(fd)
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -418,17 +268,16 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
 
     if args.emit_alert is not None:
-        _send_alert(f"⚠ {args.emit_alert}")
+        REPORTER.send_alert(f"⚠ {args.emit_alert}")
         return 0  # never fail the OnFailure unit
 
-    lock_fd = _try_lock()
-    if lock_fd is None:
+    if not REPORTER.try_lock():
         _log("another vault_sync run is in progress — skipping this tick")
         return 0
     try:
         return _run(args.dry_run)
     finally:
-        _unlock(lock_fd)
+        REPORTER.unlock()
 
 
 if __name__ == "__main__":

@@ -216,12 +216,12 @@ def test_run_idle_writes_status(tmp: Path) -> None:
     os.environ.pop("BRUNOS_HEALTHCHECK_URL", None)
     os.environ.pop("BRUNOS_ALERT_CHANNEL", None)
     status_path = tmp / "vault-sync-state.json"
-    orig = vs.STATE_FILE
-    vs.STATE_FILE = status_path
+    orig = vs.REPORTER.status_file
+    vs.REPORTER.status_file = status_path
     try:
         rc = vs._run(dry_run=False)
     finally:
-        vs.STATE_FILE = orig
+        vs.REPORTER.status_file = orig
         shared.vault_path.cache_clear()
         os.environ.pop("BRUNOS_VAULT_PATH", None)
     check(rc == 0, "_run returned 0 on idle")
