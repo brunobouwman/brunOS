@@ -234,6 +234,27 @@ def append_to_daily_log(line: str, dt: datetime | None = None) -> Path:
 _PROJECT_SLUG_RE = re.compile(r"[^a-z0-9_-]+")
 _VALID_EXPORT_TARGETS = {"personal", "linos-protostack", "discard"}
 
+# Explicit declared read-scopes for company-brain consumers.
+# Maps consumer slug → frozenset of allowed default_export values.
+# Unknown consumers are denied (fail-closed). LinOS reads only "linos-protostack".
+CONSUMER_READ_SCOPES: dict[str, frozenset[str]] = {
+    "linos": frozenset({"linos-protostack"}),
+    # Future: "vertikos": frozenset({"vertik"}),
+}
+
+
+def validate_consumer_read(capture_fm: dict, consumer: str) -> bool:
+    """Return True iff capture's default_export is in the declared scope for consumer.
+
+    Unknown consumers are denied (fail-closed). Does NOT check share_status —
+    the consuming brain is responsible for that gate.
+    """
+    allowed = CONSUMER_READ_SCOPES.get(consumer)
+    if allowed is None:
+        return False  # unknown consumer → deny
+    export = str(capture_fm.get("default_export") or "").strip()
+    return export in allowed
+
 
 def _slug(s: str) -> str:
     return _PROJECT_SLUG_RE.sub("-", s.strip().lower()).strip("-") or "unknown"

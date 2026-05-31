@@ -43,7 +43,7 @@ from shared import (  # noqa: E402
     save_state,
     vault_path,
 )
-from sanitize import wrap_external  # noqa: E402
+from sanitize import wrap_external, load_excluded_entities, scrub_excluded_entities  # noqa: E402
 
 load_env()
 
@@ -567,6 +567,20 @@ def _strip_and_mark_capture(path: Path, fm: dict, cleaned_body: str) -> None:
         return
     new_fm = _set_share_status_cleared(m.group(1))
     new_body = cleaned_body.rstrip() + "\n"
+
+    # Excluded-entities gate — fail-closed: if we can't load the list, refuse to clear.
+    try:
+        excluded = load_excluded_entities(vault_path() / "Memory")
+    except FileNotFoundError:
+        excluded = frozenset()  # no _excluded-people.md → no entities to scrub
+    except Exception as e:
+        _log(f"  excluded-entities load failed ({type(e).__name__}: {e}); skipping clear (fail-closed)")
+        return
+    if excluded:
+        new_body, n = scrub_excluded_entities(new_body, excluded)
+        if n > 0:
+            _log(f"  {path.name}: scrubbed {n} excluded-entity mention(s)")
+
     new_text = f"---\n{new_fm}\n---\n\n{new_body}"
     with file_lock(path):
         atomic_write(path, new_text)

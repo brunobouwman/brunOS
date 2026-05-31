@@ -84,3 +84,58 @@ def wrap_external(content: str, source: str, **attrs: str) -> str:
         attr_pairs.append(f'{k}="{_escape_attr(v)}"')
     attr_str = " ".join(attr_pairs)
     return f"<external_data {attr_str}>{clean_external(content)}</external_data>"
+
+
+# ---------------------------------------------------------------------------
+# Excluded-entities gate (Track C — Org layer)
+# ---------------------------------------------------------------------------
+
+_EXCLUDED_SECTION_RE = re.compile(r"^##\s+Excluded\b", re.MULTILINE | re.IGNORECASE)
+_EXCLUDED_ITEM_RE = re.compile(r"^-\s+(.+)$", re.MULTILINE)
+
+
+def load_excluded_entities(vault_memory_path) -> frozenset:
+    """Load excluded entity names from Memory/_excluded-people.md.
+
+    Reads lines starting with '- ' under the first '## Excluded' section.
+    Raises OSError if the file cannot be read (caller must handle fail-closed).
+    Returns an empty frozenset if the file exists but has no entries.
+    `vault_memory_path` should be the Memory/ directory (a pathlib.Path or str).
+    """
+    from pathlib import Path
+    path = Path(vault_memory_path) / "_excluded-people.md"
+    text = path.read_text(encoding="utf-8")  # raises OSError on failure
+    section_match = _EXCLUDED_SECTION_RE.search(text)
+    if not section_match:
+        return frozenset()
+    section_text = text[section_match.end():]
+    # Stop at the next heading
+    next_heading = re.search(r"^##", section_text, re.MULTILINE)
+    if next_heading:
+        section_text = section_text[: next_heading.start()]
+    names = {
+        m.group(1).strip()
+        for m in _EXCLUDED_ITEM_RE.finditer(section_text)
+        if m.group(1).strip()
+    }
+    return frozenset(names)
+
+
+def scrub_excluded_entities(body: str, entities: frozenset) -> tuple:
+    """Replace entity name occurrences in body with [REDACTED-ENTITY].
+
+    Case-insensitive, whole-word match. Returns (scrubbed_body, redaction_count).
+    If entities is empty, returns body unchanged with count 0.
+    """
+    if not entities:
+        return body, 0
+    count = 0
+    result = body
+    for name in entities:
+        if not name:
+            continue
+        pattern = re.compile(r"\b" + re.escape(name) + r"\b", re.IGNORECASE)
+        new_result, n = pattern.subn("[REDACTED-ENTITY]", result)
+        result = new_result
+        count += n
+    return result, count
