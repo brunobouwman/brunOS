@@ -47,7 +47,7 @@ This guards + worktrees the repo and dispatches the **plan** worker in the backg
 When Bruno asks "status" / "how's it going", run the relevant `status` command and relay it (it's already Slack-formatted).
 
 ## Prereqs / first-run caveats (verify before relying on it)
-- **`gh` must be authenticated** on the host (PR creation). Target **repo must exist** on the host running the bot (VPS); if not, the run fails at `start` with guidance — clone it first.
+- **PR creation uses the GitHub FGPAT** (`integrations/github.py` / PyGithub — no `gh` needed). The target repo MUST be in the FGPAT allowlist (fixed at token creation — a new repo means re-issuing the token) and the token needs push rights. The target **repo must already be cloned** on the host running the bot (the VPS); if not, `start` fails with clear guidance — clone it first.
 - **Canvas** needs the Slack app's `canvases:write` scope + reinstall. Until then plan delivery falls back to a summary + plan message (still works).
 - The background workers run on **bypass-permissions** in the *target* repo, so they're governed by the target repo's hooks/settings, not BrunOS's security hooks. Only point this at trusted repos.
 - Resource note: execute runs `nice`/`ionice`-capped (shared box, no resource bump yet). If we hit OOM, that's the signal to bump (per the design doc).
