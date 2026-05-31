@@ -185,6 +185,82 @@ Long-term fix: switch the consent screen to **In Production / Self-Published**.
   OnCalendar=*-*-* 08..22:15/30 America/Sao_Paulo
   ```
 
+## LinOS node (BaaS Track A — Phase C.5)
+
+The LinOS node runs as user `linos` under the `linosbrain-*` systemd namespace.
+It is the **read-side** of the BrunOS→LinOS federation: it consumes cleared
+captures from BrunOS's inbox, integrates them into LinOS's own vault, and
+publishes an ack manifest that will eventually unlock BrunOS's F2 retirement job.
+
+### Host shape
+
+- **User**: `linos`
+- **Services**: `linosbrain-*`
+- **Log dir**: `/var/log/linosbrain/`
+- **Repo**: `/home/linos/claude-second-brain/` (clone of this repo — same code, different env)
+- **Vault**: `/home/linos/LinOS/` (own private GitHub repo, e.g. `brunobouwman/linos-vault`)
+
+### Schedule
+
+| Timer | Schedule | Purpose |
+|-------|----------|---------|
+| `linosbrain-vault-sync.timer` | Every 2 min | LinOS vault ↔ GitHub git-sync |
+| `linosbrain-reflect.timer` | 08:30 BRT daily | LinOS own-vault reflection (30 min after BrunOS reflect) |
+| `linosbrain-consumer.timer` | 09:00 BRT daily | Drain BrunOS cleared captures into LinOS vault |
+
+The 1-hour gap between BrunOS reflect (08:00) and LinOS consumer (09:00) is
+intentional: it absorbs any reflect overruns on the shared CX21 and guarantees
+`share_status: cleared` is stamped before the consumer reads.
+
+### Coexistence invariants
+
+- `linos_consumer.py` opens `/home/bruno/BrunOS/Memory/_inbox/sessions/` **read-only**. No writes to any path under `/home/bruno/`.
+- No cross-user `systemctl` calls: each brain manages only its own `*osbrain-*`.
+- Consumer watermark state: `/home/linos/claude-second-brain/.claude/data/state/consumer_watermark.json`.
+- Ack manifests: `/home/linos/LinOS/Memory/_acks/brunos/<capture_id>.json`.
+
+### First-time deploy (summary)
+
+See `CLAUDE.md` § Phase C.5 and the plan at `.agents/plans/dt-*-baas-track-a-consumer-loop.md` for the full bootstrap sequence. Abbreviated:
+
+```bash
+# Prereqs: user linos exists, /home/linos/claude-second-brain/ is a git clone of this repo,
+#           /home/linos/LinOS/ vault dir exists, .claude/.env has LinOS vars.
+
+# Symlink units:
+ssh brunoos 'for f in /home/linos/claude-second-brain/deploy/systemd/linosbrain-*.{service,timer}; do
+  sudo ln -sf "$f" /etc/systemd/system/"$(basename "$f")"
+done && sudo systemctl daemon-reload'
+
+# Log dir:
+ssh brunoos 'sudo mkdir -p /var/log/linosbrain && sudo chown linos:linos /var/log/linosbrain'
+
+# Dry-run first:
+ssh brunoos 'sudo -u linos /usr/local/bin/uv run python \
+  /home/linos/claude-second-brain/.claude/scripts/linos_consumer.py --dry-run 2>&1'
+
+# Enable timers:
+ssh brunoos 'sudo systemctl enable --now \
+  linosbrain-vault-sync.timer \
+  linosbrain-reflect.timer \
+  linosbrain-consumer.timer'
+```
+
+### Verify
+
+```bash
+ssh brunoos 'systemctl list-timers linosbrain-* --no-pager'
+ssh brunoos 'tail -f /var/log/linosbrain/consumer.log'
+```
+
+### Ack manifest role
+
+Each ack at `/home/linos/LinOS/Memory/_acks/brunos/<capture_id>.json` signals
+to BrunOS that LinOS has processed the capture. The future **F2 retirement job**
+(deferred, out of scope here) will read these acks to delete BrunOS captures
+where both `(BrunOS watermark passed)` AND `(LinOS ack present)`, falling back
+to a 15-day hard-delete for captures without an ack.
+
 ## Quick smoke tests
 
 ```bash
