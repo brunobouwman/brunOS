@@ -2,6 +2,7 @@
 Description=brunoosbrain code git-sync (claude-second-brain ↔ GitHub, pull-only)
 After=network-online.target
 Wants=network-online.target
+OnFailure=brunoosbrain-alert@%n.service
 
 [Service]
 Type=oneshot
@@ -10,7 +11,7 @@ Group=bruno
 WorkingDirectory=/home/bruno/claude-second-brain
 Environment=TZ=America/Sao_Paulo
 Environment=PATH=/usr/local/bin:/usr/bin:/bin
-ExecStart=/home/bruno/claude-second-brain/deploy/bin/code-sync.sh
+ExecStart=/usr/local/bin/uv run python .claude/scripts/code_sync.py
 TimeoutStartSec=120
 LogsDirectory=brunoosbrain
 StandardOutput=append:/var/log/brunoosbrain/code-sync.log
