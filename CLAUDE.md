@@ -301,6 +301,14 @@ Never `systemctl stop lisaosbrain-*`, never `DROP ROLE lisaosbrain`, never edit 
 - [x] Phase 7 — Slack chat bot (2026-05-03)
 - [x] Phase 8 — Security hardening (4 layers) (2026-05-03)
 - [x] Phase 9 — Deployment (VPS systemd primary on `LinOS`/49.13.165.23; Mac launchd installed-but-disabled for failover; vault git-sync to `brunobouwman/brunOS-Vault`) (2026-05-19)
+- [ ] Phase C.5 — LinOS consumer loop (BaaS Track A): `linos_consumer.py` +
+  `linosbrain-*` systemd node on VPS (own user `linos`, repo
+  `/home/linos/claude-second-brain`, vault `/home/linos/LinOS`, logs
+  `/var/log/linosbrain/` — a separate namespace from both `brunoosbrain-*`
+  and Lisa's `lisaosbrain-*`). Consumer reads cleared captures from
+  BrunOS inbox (`default_export: linos-protostack`), integrates into LinOS
+  vault, publishes ack manifest at `Memory/_acks/brunos/`. Unlocks BrunOS
+  F2 retirement job.
 
 ## Reference
 

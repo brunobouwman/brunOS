@@ -1,0 +1,10 @@
+[Unit]
+Description=linosbrain memory reflection — daily 08:30 BRT (30 min after brunoosbrain-reflect)
+
+[Timer]
+OnCalendar=*-*-* 08:30 America/Sao_Paulo
+Persistent=true
+Unit=linosbrain-reflect.service
+
+[Install]
+WantedBy=timers.target
