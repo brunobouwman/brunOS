@@ -143,11 +143,23 @@ The four scheduled jobs (heartbeat / reflect / weekly-review / news-digest) are 
 | VPS journal | systemd journal | `journalctl -u brunoosbrain-<svc> -f` |
 | Mac | `~/Library/Logs/com.bruno.brunos.<svc>.log` | `tail -f ~/Library/Logs/com.bruno.brunos.<svc>.log` |
 
-## Concat-both merge driver caveats
+## Vault sync (`vault_sync.py`)
+
+The vault sync is owned by `.claude/scripts/vault_sync.py` (NOT simonthum git-sync — that dead-looped on conflicts and depended on per-clone `syncNewFiles` config that drifted, silently freezing the vault for days). Both hosts run it every 2 min (VPS: `brunoosbrain-vault-sync.{service,timer}`; Mac: `com.bruno.brunos.git-sync.plist`, via `uv` for TCC/FDA).
+
+Each run: `preflight` self-heals config (commit identity + concat-both driver) → `fetch` → commit any local changes (`git add -A`, so new files just work) → `merge` origin (ort + rename detection) → `push` (with one refetch+remerge+retry on a two-host race).
+
+**Conflict policy — never leaves a broken tree.** Append-only files (`Memory/daily/*.md`, `Memory/HABITS.md`) auto-merge via the concat-both driver. Any *other* conflict (e.g. `MEMORY.md`, project notes) is **not** guessed at: the merge is `--abort`ed (working tree returns to clean + usable), a loud alert fires, and the next tick retries. Sync pauses, nothing bricks or is lost. Resolve manually (or ask the agent), then it converges.
+
+**Observability — 3 layers + 1 backstop.** (1) In-script **Slack alert** to `BRUNOS_ALERT_CHANNEL` on failure, rate-limited (first failure / changed error / hourly). (2) systemd **`OnFailure=brunoosbrain-alert@%n.service`** catches crashes too hard to self-alert. (3) **healthchecks.io** dead-man's-switch (`BRUNOS_HEALTHCHECK_URL`, one check per host) — pinged every run; if pings stop entirely (timer/host dead) it alerts after the grace window. (4) `heartbeat.py` also echoes a stale/failing sync in its tick. Status is written to `.claude/data/state/vault-sync-state.json`.
+
+**Provisioning.** Run `deploy/bin/init-vault-sync.sh` once per fresh vault clone (sets identity + concat-both driver). `preflight` re-asserts these every run, so a host can't be born broken. Set `BRUNOS_ALERT_CHANNEL` + `BRUNOS_HEALTHCHECK_URL` (+ optional `BRUNOS_SYNC_HOST_LABEL`) in each host's `.claude/.env`.
+
+### Concat-both merge driver caveats
 
 `deploy/bin/git-merge-concat` is registered for `Memory/daily/*.md` and `Memory/HABITS.md` only. It concatenates the union of unique lines from both sides, so neither Mac nor VPS appends are lost — but **line order is not preserved**. Bruno reads daily logs by timestamp anyway, so reorder is fine for these files. Don't extend the driver to non-append-only files.
 
-For any other vault file (SOUL.md, USER.md, MEMORY.md, project notes) git falls back to the default 3-way merge — conflicts surface as standard `<<<<<<<` markers and require manual resolution.
+For any other vault file (SOUL.md, USER.md, MEMORY.md, project notes) the sync's conflict policy applies (abort-clean + alert + retry; see above) — there are no lingering `<<<<<<<` markers in the working tree.
 
 ## Snapshot cold-start on failover
 
@@ -193,7 +205,9 @@ deploy/
   README.md                                 (you are here)
   bin/
     git-merge-concat                        merge driver for daily logs + HABITS.md
-    install-merge-driver.sh                 register the driver per-clone (run inside vault repo)
+    init-vault-sync.sh                      provision vault sync invariants per-clone (identity + concat-both driver)
+    install-merge-driver.sh                 (legacy) register just the driver; superseded by init-vault-sync.sh
+    git_sync.py                             DEPRECATED shim — delegates to .claude/scripts/vault_sync.py
     seed-bruno-on-host.sh                   one-shot, root SSH, adds Bruno's pubkey to /home/bruno/.ssh/authorized_keys
     bootstrap-bruno.sh                      run as bruno on VPS — clone repo, setup.sh, symlink units
     sync-secrets.sh                         scp .claude/.env + google_token.json to VPS
@@ -212,6 +226,7 @@ deploy/
     brunoosbrain-news-digest.{service,timer}
     brunoosbrain-slackbot.service
     brunoosbrain-vault-sync.{service,timer}
+    brunoosbrain-alert@.service             template — OnFailure alert (Slack via vault_sync.py --emit-alert)
   vault/
     gitignore                               template for BrunOS/.gitignore (drafts/active/, personal/finance.md, .DS_Store, .obsidian/)
     gitattributes                           template for BrunOS/.gitattributes (Memory/daily/*.md + HABITS.md → concat-both)

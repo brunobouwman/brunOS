@@ -33,11 +33,14 @@ command -v /usr/local/bin/uv >/dev/null \
 command -v git >/dev/null \
   || { echo "ERROR: git missing — Lisa's setup expected" >&2; exit 1; }
 
+# NOTE: the vault sync is owned by .claude/scripts/vault_sync.py now — the
+# simonthum git-sync binary is no longer required (it dead-looped on conflicts).
+# Left as a no-op if you still want it around for ad-hoc use:
 if ! command -v git-sync >/dev/null; then
-  echo "==> install git-sync (simonthum) — not part of Lisa's host setup"
+  echo "==> (optional/legacy) install simonthum git-sync — NOT used by vault-sync unit"
   sudo curl -fsSL https://raw.githubusercontent.com/simonthum/git-sync/master/git-sync \
-    -o /usr/local/bin/git-sync
-  sudo chmod +x /usr/local/bin/git-sync
+    -o /usr/local/bin/git-sync || true
+  sudo chmod +x /usr/local/bin/git-sync || true
 fi
 
 echo "==> clone or fast-forward repo"
@@ -61,8 +64,11 @@ sudo systemctl daemon-reload
 echo "==> done."
 echo "    Next:"
 echo "      1) From Mac: deploy/bin/sync-secrets.sh   # scp .env + google_token.json"
-echo "      2) On VPS:   /usr/local/bin/uv run python .claude/scripts/memory_index.py --full"
-echo "      3) On VPS:   sudo systemctl enable --now \\"
+echo "         (ensure .env has BRUNOS_ALERT_CHANNEL + BRUNOS_HEALTHCHECK_URL for this host)"
+echo "      2) On VPS:   clone the vault, then provision its sync invariants:"
+echo "                     BRUNOS_SYNC_HOST_LABEL=vps bash deploy/bin/init-vault-sync.sh"
+echo "      3) On VPS:   /usr/local/bin/uv run python .claude/scripts/memory_index.py --full"
+echo "      4) On VPS:   sudo systemctl enable --now \\"
 echo "                     brunoosbrain-vault-sync.timer \\"
 echo "                     brunoosbrain-heartbeat.timer \\"
 echo "                     brunoosbrain-reflect.timer \\"

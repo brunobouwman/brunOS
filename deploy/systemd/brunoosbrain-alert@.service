@@ -1,0 +1,19 @@
+[Unit]
+# Template alert unit. Wired via `OnFailure=brunoosbrain-alert@%n.service` on
+# other units: when the parent unit fails, systemd launches this with %i set to
+# the failed unit's name. Posts a Slack alert via vault_sync.py --emit-alert.
+# This is the layer that fires even when the parent crashed too hard to alert
+# itself (e.g. interpreter/import failure before its own alert path runs).
+Description=brunoosbrain failure alert for %i
+
+[Service]
+Type=oneshot
+User=bruno
+Group=bruno
+WorkingDirectory=/home/bruno/claude-second-brain
+Environment=TZ=America/Sao_Paulo
+Environment=PATH=/usr/local/bin:/usr/bin:/bin
+ExecStart=/usr/local/bin/uv run python .claude/scripts/vault_sync.py --emit-alert "systemd unit %i failed on this host"
+LogsDirectory=brunoosbrain
+StandardOutput=append:/var/log/brunoosbrain/vault-sync.log
+StandardError=append:/var/log/brunoosbrain/vault-sync.log

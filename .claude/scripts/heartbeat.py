@@ -36,6 +36,7 @@ from shared import (  # noqa: E402
     _ts_brt,
     append_to_daily_log,
     load_env,
+    load_state,
     now_brt,
     save_state,
     vault_path,
@@ -581,6 +582,38 @@ def _notify(title: str, message: str) -> None:
         pass
 
 
+def _vault_sync_warning() -> str | None:
+    """Belt-and-suspenders: surface a stale/failing vault sync in the heartbeat.
+
+    Primary alerting is vault_sync.py's own Slack alert + healthchecks.io
+    dead-man's-switch; this just echoes it in-band (the tick + the notify) so a
+    broken sync is visible from multiple angles. Never raises.
+    """
+    try:
+        from datetime import datetime
+
+        st = load_state(STATE_DIR / "vault-sync-state.json", default=None)
+        if not st:
+            return None
+        host = st.get("host", "?")
+        fails = int(st.get("consecutive_failures", 0))
+        if fails > 0:
+            err = (st.get("last_error") or {}).get("type", "?")
+            return f"⚠ vault sync failing ({fails}×, last error: {err}) on {host}"
+        last = st.get("last_success")
+        stale = True
+        if last:
+            try:
+                stale = (now_brt() - datetime.fromisoformat(last)).total_seconds() > 900
+            except ValueError:
+                stale = True
+        if stale:
+            return f"⚠ vault sync stale on {host} (last success {last or 'never'})"
+        return None
+    except Exception:  # noqa: BLE001 — a backstop must never break the tick
+        return None
+
+
 # --- Helpers ---
 
 
@@ -683,13 +716,17 @@ def _run(dry_run: bool, no_agent: bool, force: bool) -> int:
     ):
         _log("stage 5: empty-delta fast-path — skipping agent")
         if not dry_run:
-            tick_line = f"\n## Heartbeat tick ({now_brt().strftime('%H:%M')})\n\n- No changes since last tick.\n"
+            sync_warn = _vault_sync_warning()
+            note = "- No changes since last tick.\n"
+            if sync_warn:
+                note += f"- {sync_warn}\n"
+            tick_line = f"\n## Heartbeat tick ({now_brt().strftime('%H:%M')})\n\n{note}"
             try:
                 append_to_daily_log(tick_line)
             except Exception as e:
                 _log(f"  daily log append failed: {type(e).__name__}: {e}")
             _persist_last_run(delta, signals, "fast-path")
-            _notify("BrunOS heartbeat", "No changes")
+            _notify("BrunOS heartbeat", sync_warn or "No changes")
         return 0
 
     # Stage 6: build delta text + sanitize
@@ -765,7 +802,8 @@ def _run(dry_run: bool, no_agent: bool, force: bool) -> int:
     summary = (agent_output or "tick done").splitlines()[-1][:120]
     _log(f"  agent done; summary: {summary!r}")
     _persist_last_run(delta, signals, "ok")
-    _notify("BrunOS heartbeat", summary)
+    sync_warn = _vault_sync_warning()
+    _notify("BrunOS heartbeat", f"{sync_warn} | {summary}"[:120] if sync_warn else summary)
     return 0
 
 
