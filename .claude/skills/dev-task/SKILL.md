@@ -1,6 +1,6 @@
 ---
 name: dev-task
-description: Autonomous coding task for BrunOS — take a feature/fix/refactor in a PROJECT repo end-to-end (isolate a git worktree → plan → get Bruno's approval → execute in the background → open a DRAFT PR), with full monitoring. Use when Bruno asks to build/implement/fix/refactor something in one of his project repos (vertik / lab-agent / chat-ui / colinas / etc.), to "open a PR for", to "work on a task", or references a ClickUp task to implement. Also use to check on dev work: "dev-task status", "how's that PR", "what's running". NEVER targets the BrunOS code repo or the vault.
+description: Autonomous coding task for BrunOS — take a feature/fix/refactor in a PROJECT repo end-to-end (isolate a git worktree → plan → get Bruno's approval → execute in the background → open a DRAFT PR), with full monitoring. Use WHENEVER Bruno asks to build/implement/fix/refactor something in a project repo, to "open a PR for", to "work on a task", OR references a ClickUp task to implement — e.g. "implement this task from ClickUp", "implement CU-1234", "do the ClickUp task about X", "ship the <name> task". In those cases auto-resolve everything yourself (look up ClickUp, default the repo, use the current Slack thread) — do NOT make Bruno specify repo/context/channel. Also use to check on dev work: "dev-task status", "how's that PR", "what's running". NEVER targets the BrunOS code repo or the vault.
 ---
 
 # dev-task — autonomous dev (plan → approve → execute → draft PR)
@@ -15,16 +15,28 @@ Turns a Slack request (often from Bruno's phone) into a draft PR in a **project 
 - **Project repos ONLY.** The script HARD-REFUSES the BrunOS code repo and the vault (that read-only checkout is what `code-sync` breaks on — the incident this skill exists to prevent). Don't fight the refusal; it's correct.
 - **PRs are DRAFT.** Never merge, never mark ready — that stays Bruno's call (SOUL.md: GitHub PRs are ask-first).
 
+## Auto-resolve — Bruno should NOT have to specify params
+
+When Bruno says something like *"implement this ClickUp task"* / *"implement CU-1234"* / *"do the ClickUp task about the budget bug"*, resolve everything yourself — he gives the task, you fill the rest:
+
+1. **ClickUp lookup (deterministic, no MCP needed):**
+   - If he gave an id/URL: `uv run python .claude/scripts/query.py clickup task <id-or-url> --json` → use `name` + `description` as the context, and `--source clickup:<id>`.
+   - If he described it instead of giving an id: `query.py clickup today` / `clickup overdue` to find the match; if more than one plausibly fits, ask which (one short question), else proceed.
+2. **Target repo — default it, don't ask:** use the default in `.claude/data/state/dev-task/repos.json` / your USER.md default (currently **`brunos-dev`**). Only ask when the default is ambiguous (multiple repos cloned and the task doesn't indicate which).
+3. **Channel + thread — fill from the current Slack message automatically** (you already have them; never ask Bruno for these).
+
+Then call `start` (below). The only thing that should ever come from Bruno is the task itself (and occasionally a repo, once more are cloned).
+
 ## Flow
 
 All commands: `uv run python .claude/skills/dev-task/scripts/dev_task.py …`
 
-**1. Start a task.** Gather context first: if Bruno named a ClickUp task, pull its description (`uv run python .claude/scripts/query.py clickup …` / the ClickUp MCP) and combine with his own words. Resolve the target repo (absolute path, or an alias in `.claude/data/state/dev-task/repos.json`; if the alias is unknown, ask Bruno for the path once). Then:
+**1. Start a task** (with the auto-resolved values above):
 
 ```bash
-dev_task.py start --repo <abs-path-or-alias> \
-  --context "<the full feature/fix description>" \
-  --channel <this Slack channel id> --thread <this thread ts> \
+dev_task.py start --repo <alias-or-abs-path> \
+  --context "<ClickUp name + description, or Bruno's words>" \
+  --channel <current Slack channel id> --thread <current thread ts> \
   [--source clickup:<task_id>] [--slug short-name]
 ```
 

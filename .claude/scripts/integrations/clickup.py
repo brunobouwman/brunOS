@@ -13,6 +13,7 @@ returns [] because everything looks 50 years in the future.
 from __future__ import annotations
 
 import argparse
+import json
 import os
 import sys
 import time
@@ -264,6 +265,47 @@ def format_for_context(tasks: list[Task]) -> str:
     return "\n".join(lines)
 
 
+def _parse_task_id(ref: str) -> str:
+    """Accept a raw task id or a ClickUp task URL; return the bare id."""
+    ref = ref.strip()
+    if "/t/" in ref:
+        ref = ref.split("/t/", 1)[1].split("/")[0].split("?")[0]
+    return ref
+
+
+def get_task(task_ref: str) -> dict:
+    """Fetch one task by id or URL → {id,name,status,url,list,description}.
+
+    Turns 'implement <ClickUp task>' into plan context for the dev-task skill.
+    Tries the plain id first; on miss, retries each workspace with
+    custom_task_ids=true (handles human-facing custom ids like CU-1234).
+    """
+    task_id = _parse_task_id(task_ref)
+    raw: dict | None = None
+    try:
+        raw = _get(f"/task/{task_id}")
+    except Exception:
+        raw = None
+    if not raw:
+        for _ws, team_id in _workspaces().items():
+            try:
+                raw = _get(f"/task/{task_id}", custom_task_ids="true", team_id=team_id)
+                if raw:
+                    break
+            except Exception:
+                continue
+    if not raw:
+        raise RuntimeError(f"ClickUp task not found: {task_ref!r}")
+    return {
+        "id": str(raw.get("id", "")),
+        "name": str(raw.get("name", "")),
+        "status": str((raw.get("status") or {}).get("status", "")),
+        "url": str(raw.get("url", "")),
+        "list": str((raw.get("list") or {}).get("name", "")),
+        "description": str(raw.get("description") or raw.get("text_content") or "").strip(),
+    }
+
+
 # --- CLI ---
 
 
@@ -287,6 +329,10 @@ def add_subparser(sub: argparse._SubParsersAction) -> None:
     ps.add_argument("task_id")
     ps.add_argument("new_status")
 
+    pg = sp.add_parser("task", help="Fetch one task by id/URL (name + description)")
+    pg.add_argument("task_id", help="task id, custom id (e.g. CU-1234), or task URL")
+    pg.add_argument("--json", action="store_true", help="emit raw JSON")
+
     p.set_defaults(_handler=cli)
 
 
@@ -307,5 +353,16 @@ def cli(args: argparse.Namespace) -> int:
     if cmd == "status":
         t = update_status(args.task_id, args.new_status)
         print(f"Updated: {t.id} → {t.status}")
+        return 0
+    if cmd == "task":
+        t = get_task(args.task_id)
+        if getattr(args, "json", False):
+            print(json.dumps(t, ensure_ascii=False, indent=2))
+        else:
+            print(f"[{t['status']}] {t['name']}  ({t['url']})")
+            if t["list"]:
+                print(f"list: {t['list']}")
+            if t["description"]:
+                print(f"\n{t['description']}")
         return 0
     return 2
