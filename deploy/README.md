@@ -188,9 +188,14 @@ Long-term fix: switch the consent screen to **In Production / Self-Published**.
 ## LinOS node (BaaS Track A — Phase C.5)
 
 The LinOS node runs as user `linos` under the `linosbrain-*` systemd namespace.
-It is the **read-side** of the BrunOS→LinOS federation: it consumes cleared
-captures from BrunOS's inbox, integrates them into LinOS's own vault, and
-publishes an ack manifest that will eventually unlock BrunOS's F2 retirement job.
+It is the **read-side** of the BrunOS→LinOS federation: it integrates cleared,
+in-scope captures into LinOS's own vault and publishes an ack manifest that will
+eventually unlock BrunOS's F2 retirement job.
+
+`linos` has **zero access to `/home/bruno`** (which stays `0700`). Instead, a
+bruno-side push (`sync_cleared_inbox.py`, below) mirrors only the captures LinOS
+is authorized to see into a LinOS-readable inbox dir; `linos_consumer.py` reads
+that mirror, never BrunOS's real inbox.
 
 ### Host shape
 
@@ -198,23 +203,55 @@ publishes an ack manifest that will eventually unlock BrunOS's F2 retirement job
 - **Services**: `linosbrain-*`
 - **Log dir**: `/var/log/linosbrain/`
 - **Repo**: `/home/linos/claude-second-brain/` (clone of this repo — same code, different env)
-- **Vault**: `/home/linos/LinOS/` (own private GitHub repo, e.g. `brunobouwman/linos-vault`)
+- **Vault**: `/home/linos/LinOS/` (own private GitHub repo: `brunobouwman/Linos`)
+- **Inbox mirror**: `/home/linos/brunos-inbox/sessions/` (LinOS-readable; written only by the bruno-side push — see below. Set `BRUNOS_INBOX_PATH` in LinOS's `.claude/.env` to this path.)
+
+### Cleared-inbox transport (bruno → LinOS)
+
+`deploy/bin/sync_cleared_inbox.py` runs **as `bruno`** (the only user that can
+read `/home/bruno/BrunOS`) and rsyncs into LinOS's inbox mirror **only** the
+captures that pass LinOS's federation gate — `default_export == linos-protostack`
+(via `shared.validate_consumer_read`) **AND** `share_status == "cleared"`.
+
+Both gates are required. `share_status: cleared` alone is **not** an
+authorization — reflection stamps `cleared` on every capture once personal
+asides are stripped, so most `default_export: personal` (Vertik/lab-agent/
+chat-ui) captures are also `cleared`. On the live inbox today that is the
+difference between **119** captures (cleared-only — leaks confidential work) and
+**9** (scope+cleared — only LinOS-authorized). The scope check is the actual
+privacy boundary, enforced at the transport so an out-of-scope capture is never
+even physically present in LinOS's tree (defense-in-depth with the consumer's
+own re-check).
+
+```bash
+# bruno-side, scheduled BETWEEN BrunOS reflect (≈08:00/08:30) and the consumer (09:00):
+BRUNOS_INBOX_SRC=/home/bruno/BrunOS/Memory/_inbox/sessions \
+LINOS_INBOX_DEST=/home/linos/brunos-inbox/sessions \
+  /usr/local/bin/uv run python deploy/bin/sync_cleared_inbox.py --dry-run   # preview, then drop --dry-run
+```
+
+Safety mirrors `sync_inbox.py`: `-a --update` (never clobbers a newer dest
+file), **no `--delete`**, idempotent. A not-yet-cleared capture is simply skipped
+until a later run after it's cleared. The `bruno`→`linos` dir-ownership wiring
+(group/ACL on the dest mirror) is settled at deploy time; the script presumes
+only that `bruno` can read the src and write the dst.
 
 ### Schedule
 
-| Timer | Schedule | Purpose |
-|-------|----------|---------|
-| `linosbrain-vault-sync.timer` | Every 2 min | LinOS vault ↔ GitHub git-sync |
-| `linosbrain-reflect.timer` | 08:30 BRT daily | LinOS own-vault reflection (30 min after BrunOS reflect) |
-| `linosbrain-consumer.timer` | 09:00 BRT daily | Drain BrunOS cleared captures into LinOS vault |
+| Timer | Runs as | Schedule | Purpose |
+|-------|---------|----------|---------|
+| `brunoosbrain-linos-inbox-sync.timer` | `bruno` | 08:45 BRT daily | Push cleared+in-scope captures → LinOS inbox mirror |
+| `linosbrain-vault-sync.timer` | `linos` | Every 2 min | LinOS vault ↔ GitHub git-sync |
+| `linosbrain-reflect.timer` | `linos` | 08:30 BRT daily | LinOS own-vault reflection (30 min after BrunOS reflect) |
+| `linosbrain-consumer.timer` | `linos` | 09:00 BRT daily | Integrate the inbox mirror into LinOS vault |
 
-The 1-hour gap between BrunOS reflect (08:00) and LinOS consumer (09:00) is
-intentional: it absorbs any reflect overruns on the shared CX21 and guarantees
-`share_status: cleared` is stamped before the consumer reads.
+Ordering matters: BrunOS reflect (08:00) stamps `cleared` → bruno-side push
+(08:45) mirrors scope+cleared captures out → LinOS consumer (09:00) integrates.
+The gaps absorb reflect overruns on the shared CX21.
 
 ### Coexistence invariants
 
-- `linos_consumer.py` opens `/home/bruno/BrunOS/Memory/_inbox/sessions/` **read-only**. No writes to any path under `/home/bruno/`.
+- `linos` never reads `/home/bruno`; the only data crossing is what `bruno`'s push explicitly mirrors out (scope+cleared). `linos_consumer.py` reads only `/home/linos/brunos-inbox/`.
 - No cross-user `systemctl` calls: each brain manages only its own `*osbrain-*`.
 - Consumer watermark state: `/home/linos/claude-second-brain/.claude/data/state/consumer_watermark.json`.
 - Ack manifests: `/home/linos/LinOS/Memory/_acks/brunos/<capture_id>.json`.
@@ -225,7 +262,9 @@ See `CLAUDE.md` § Phase C.5 and the plan at `.agents/plans/dt-*-baas-track-a-co
 
 ```bash
 # Prereqs: user linos exists, /home/linos/claude-second-brain/ is a git clone of this repo,
-#           /home/linos/LinOS/ vault dir exists, .claude/.env has LinOS vars.
+#           /home/linos/LinOS/ vault dir exists, .claude/.env has LinOS vars
+#           (BRUNOS_INBOX_PATH=/home/linos/brunos-inbox/sessions, LINOS_VAULT_PATH=/home/linos/LinOS),
+#           and the bruno-side brunoosbrain-linos-inbox-sync timer is installed (populates the mirror).
 
 # Symlink units:
 ssh brunoos 'for f in /home/linos/claude-second-brain/deploy/systemd/linosbrain-*.{service,timer}; do

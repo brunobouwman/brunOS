@@ -39,11 +39,19 @@ CREDENTIAL_PATH_PATTERNS = [
     r"payment",
 ]
 
+# Carve-out: `*.example` files are committed templates with placeholder values
+# only (e.g. `.claude/.env.example`), so they must stay readable/editable even
+# though their name matches a credential pattern like `\.env(\.|$)`. Applied to
+# path tools (see _path_match) and to the env-file Bash patterns below via this
+# `.env`-token that excludes a trailing `.example`.
+SAFE_TEMPLATE_SUFFIXES = (".example",)
+_ENV = r"\.env(?!\.example)(\.[^\s]+)?"  # .env / .env.local — but NOT .env.example
+
 ENV_EXFIL_BASH_PATTERNS = [
-    r"\bcat\s+(\.env(\.[^\s]+)?|.*/\.env(\.[^\s]+)?|.*\.pem|.*\.key)\b",
-    r"\bhead\s+(\.env(\.[^\s]+)?|.*/\.env(\.[^\s]+)?)\b",
-    r"\btail\s+(\.env(\.[^\s]+)?|.*/\.env(\.[^\s]+)?)\b",
-    r"\bless\s+(\.env(\.[^\s]+)?|.*/\.env(\.[^\s]+)?)\b",
+    rf"\bcat\s+({_ENV}|.*/{_ENV}|.*\.pem|.*\.key)\b",
+    rf"\bhead\s+({_ENV}|.*/{_ENV})\b",
+    rf"\btail\s+({_ENV}|.*/{_ENV})\b",
+    rf"\bless\s+({_ENV}|.*/{_ENV})\b",
     r"\bprintenv\b",
     r"\benv\s*$",
     r"\benv\s*\|",
@@ -52,7 +60,7 @@ ENV_EXFIL_BASH_PATTERNS = [
     r"\becho\s+\$[A-Z_]+SECRET\b",
     r"\bpython\d?\s+-c\s+.*os\.environ",
     r"\bnode\s+-e\s+.*process\.env",
-    r"\bpython\d?\s+-c\s+.*open\(['\"](\.env|/[^'\"]*\.env)",
+    rf"\bpython\d?\s+-c\s+.*open\(['\"]({_ENV}|/[^'\"]*{_ENV})",
 ]
 
 _SUBSHELL = re.compile(r"\$\(([^)]*)\)|`([^`]*)`")
@@ -82,7 +90,15 @@ def _candidate_paths(raw_path: str) -> list[str]:
     return [c.replace("\\", "/") for c in candidates]
 
 
+def _is_safe_template(raw_path: str) -> bool:
+    """True for committed `*.example` template files (placeholders, no secrets)."""
+    name = str(raw_path).replace("\\", "/").rstrip("/").rsplit("/", 1)[-1]
+    return name.endswith(SAFE_TEMPLATE_SUFFIXES)
+
+
 def _path_match(raw_path: str) -> str | None:
+    if raw_path and _is_safe_template(raw_path):
+        return None
     for candidate in _candidate_paths(raw_path):
         for pattern in CREDENTIAL_PATH_PATTERNS:
             if re.search(pattern, candidate, flags=re.IGNORECASE):
