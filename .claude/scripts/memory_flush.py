@@ -29,6 +29,7 @@ os.environ.setdefault("CLAUDE_INVOKED_BY", "memory_flush")
 
 import asyncio  # noqa: E402
 import json  # noqa: E402
+import re  # noqa: E402
 import sys  # noqa: E402
 from datetime import datetime  # noqa: E402
 from pathlib import Path  # noqa: E402
@@ -55,29 +56,46 @@ LAST_FLUSH_PATH = STATE_DIR / "last_flush.json"
 # _slice_incremental. Distinct from LAST_FLUSH_PATH (60s dedup timestamps).
 FLUSH_OFFSETS_PATH = STATE_DIR / "flush_offsets.json"
 
+# When the flush model returns content we can't parse as the {work, personal}
+# JSON, which bucket should the unparsed blob fall into? Default "personal" =
+# privacy-first (daily log only, never a company inbox). A deployment can set
+# BRUNOS_FLUSH_PARSE_FALLBACK=work to prefer not losing project continuity — it's
+# a per-company privacy-vs-continuity business decision, hence configurable.
+_FLUSH_PARSE_FALLBACK = (
+    os.environ.get("BRUNOS_FLUSH_PARSE_FALLBACK", "personal").strip().lower()
+)
+
 SYSTEM_PROMPT = """You distil an agent session transcript (Claude Code or Codex) \
-into durable memory for BrunOS. Output only what is worth remembering across \
-sessions: decisions made, lessons learned, surprising findings, blockers and TODOs. \
-Skip routine tool output, repeated context, and conversational filler.
+into durable memory for BrunOS, Bruno's second brain. Return ONE JSON object \
+(no preamble, no fenced blocks):
 
-NEVER include credentials in your output, even if they appear in the transcript. \
+{
+  "work": "<terse markdown bullets — project/professional content only>",
+  "personal": "<terse markdown bullets — Bruno's personal asides only, or empty string>"
+}
+
+WORK FIELD: decisions made, lessons learned, surprising findings, blockers, TODOs, \
+architecture choices, client/project facts. Must be safe to share with a company-brain \
+consumer. NEVER include: personal mood, health, family, personal finances, personal \
+relationship asides, Bruno's non-work thoughts.
+
+PERSONAL FIELD: mood notes, health, family mentions, personal decisions, any \
+non-work aside Bruno mentioned. If the session contains no personal content, \
+return an empty string "".
+
+NEVER include credentials in EITHER field, even if they appear in the transcript. \
 This includes: passwords, API keys, OAuth tokens, bearer tokens, JWTs, SSH keys, \
-private keys, postgres/mysql/mongodb connection strings (`postgresql://user:pass@...`), \
-session cookies, AWS access keys, secrets in env-var assignments \
-(`OPENAI_API_KEY=sk-...`, `PGPASSWORD=...`, `GOOGLE_API_KEY=...`). When a decision \
-or lesson genuinely requires referring to one of these, abstract it (e.g., \
-"rotated the Vertik prod DB password" — not the password itself). Same rule for \
-internal IPs of private infrastructure: refer to roles ("the prod DB") rather than \
-literal addresses. The bar: if a bullet contains a string that could authenticate \
-someone or grant access to a system, rewrite it.
+private keys, connection strings, session cookies, AWS access keys. Abstract them \
+(e.g., "rotated the prod DB password" — not the password itself). Same rule for \
+internal IPs: refer to roles ("the prod DB"), not literal addresses.
 
-Format: terse markdown bullets, each one self-contained (no pronouns referring to \
-prior bullets). Maximum 12 bullets. If nothing in the transcript meets the bar, \
-output exactly:
+Format for each field: terse markdown bullets, each self-contained (no pronouns \
+referring to prior bullets). Maximum 10 bullets per field. If neither field \
+contains anything worth capturing, output exactly:
 
 FLUSH_OK
 
-(no preamble, no explanation)."""
+(no preamble, no JSON, no explanation — just the literal string FLUSH_OK)."""
 
 
 def _within_dedup_window(session_id: str) -> bool:
@@ -146,6 +164,43 @@ async def _consolidate(transcript_text: str) -> str:
         if text:
             parts.append(text)
     return "".join(parts).strip()
+
+
+def _parse_flush_output(raw: str) -> tuple[str, str]:
+    """Parse structured flush output into (work_text, personal_text).
+
+    Returns ("", "") for FLUSH_OK.
+    On JSON parse failure, preserves the content but routes it per
+    _FLUSH_PARSE_FALLBACK: "personal" (default, privacy-first → daily log only,
+    never a company inbox) or "work" (continuity-first → eligible for the inbox).
+    """
+    stripped = raw.strip()
+    if stripped == "FLUSH_OK":
+        return "", ""
+    # Try JSON parse (tolerate markdown fences)
+    candidate = stripped
+    fence_match = re.search(r"```(?:json)?\s*(\{.*?\})\s*```", candidate, re.DOTALL)
+    if fence_match:
+        candidate = fence_match.group(1)
+    else:
+        # Try to find bare { ... }
+        start = candidate.find("{")
+        end = candidate.rfind("}")
+        if start >= 0 and end > start:
+            candidate = candidate[start : end + 1]
+    try:
+        parsed = json.loads(candidate)
+        if isinstance(parsed, dict):
+            work = str(parsed.get("work") or "").strip()
+            personal = str(parsed.get("personal") or "").strip()
+            return work, personal
+    except (json.JSONDecodeError, ValueError):
+        pass
+    # Fallback (data-preserving, never loses content): route the unparsed blob
+    # per the configured privacy-vs-continuity preference. Default = personal.
+    if _FLUSH_PARSE_FALLBACK == "work":
+        return stripped, ""
+    return "", stripped
 
 
 def _load_kickoff(path: Path) -> dict | None:
@@ -249,7 +304,10 @@ def main(argv: list[str]) -> int:
         sys.stderr.write(f"memory_flush: SDK call failed: {type(e).__name__}: {e}\n")
         return 0
 
-    if not output or output.strip() == "FLUSH_OK":
+    work_text, personal_text = _parse_flush_output(output)
+
+    if not work_text and not personal_text:
+        # FLUSH_OK or parse returned nothing — record and exit cleanly
         _record_flush(session_id)
         if new_offset is not None:
             _record_offset(session_id, new_offset)
@@ -259,20 +317,34 @@ def main(argv: list[str]) -> int:
     project = (kickoff.get("_project") or "").strip()
     default_export = (kickoff.get("_default_export") or "").strip()
     source = kickoff.get("_source") or "session-end"
-    header = f"## Memory flush ({now_brt().strftime('%H:%M')})"
-    block = f"\n{header}\n\n{output.strip()}\n"
+    ts_label = now_brt().strftime("%H:%M")
 
     try:
         if project and project.lower() != "brunos":
-            write_inbox_capture(
-                project=project,
-                default_export=default_export or "personal",
-                session_id=session_id,
-                source=source,
-                body=block,
-            )
+            # Shareable capture: only work content goes to the project inbox.
+            # Personal content goes directly to today's daily log — it has
+            # NO code path to the company inbox (Layer 1 structural separation).
+            if work_text:
+                work_block = f"\n## Memory flush ({ts_label})\n\n{work_text}\n"
+                write_inbox_capture(
+                    project=project,
+                    default_export=default_export or "personal",
+                    session_id=session_id,
+                    source=source,
+                    body=work_block,
+                )
+            if personal_text:
+                personal_block = f"\n## Personal note ({ts_label})\n\n{personal_text}\n"
+                append_to_daily_log(personal_block)
         else:
-            append_to_daily_log(block)
+            # Personal / BrunOS session — all content goes to the daily log.
+            parts = []
+            if work_text:
+                parts.append(f"## Memory flush ({ts_label})\n\n{work_text}")
+            if personal_text:
+                parts.append(f"## Personal note ({ts_label})\n\n{personal_text}")
+            if parts:
+                append_to_daily_log("\n" + "\n\n".join(parts) + "\n")
     except Exception as e:
         sys.stderr.write(f"memory_flush: write failed: {type(e).__name__}: {e}\n")
         return 0

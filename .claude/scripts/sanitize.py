@@ -139,3 +139,75 @@ def scrub_excluded_entities(body: str, entities: frozenset) -> tuple:
         result = new_result
         count += n
     return result, count
+
+
+# ---------------------------------------------------------------------------
+# Secret / PII scrub (Track B — deterministic scrub layer)
+# ---------------------------------------------------------------------------
+#
+# This is the LAST deterministic line of defense before a capture is marked
+# shareable (memory_reflect._strip_and_mark_capture). It must be high-precision:
+# a false positive silently corrupts legitimate work/technical content (order
+# IDs, counts, version strings), which the federation contract requires to be
+# preserved verbatim. Patterns are anchored / structurally specific for that
+# reason — e.g. no bare "any 11-digit number" CPF rule, and the RFC1918 IP
+# pattern matches a full four octets per class.
+
+_SECRET_PATTERNS: list[tuple[str, str]] = [
+    # OpenAI / Anthropic key patterns (include _ for sk-proj-... and test keys)
+    (r"\bsk-[A-Za-z0-9_\-]{15,}\b", "[REDACTED-SECRET]"),
+    # GitHub PAT (classic ghp_ and fine-grained github_pat_)
+    (r"\b(?:ghp|gho|ghs|ghr|github_pat)_[A-Za-z0-9]{20,}\b", "[REDACTED-SECRET]"),
+    # JWT: three base64url segments separated by dots, starting eyJ
+    (r"\beyJ[A-Za-z0-9_\-]+\.[A-Za-z0-9_\-]+\.[A-Za-z0-9_\-]+", "[REDACTED-JWT]"),
+    # Bearer / token assignment patterns
+    (r"\bBearer\s+[A-Za-z0-9\-._~+/]{20,}={0,2}\b", "[REDACTED-SECRET]"),
+    (r"(?i)\b(?:api[_-]?key|secret|token|password|passwd|apikey)\s*[=:]\s*['\"]?[A-Za-z0-9\-._~+/]{8,}['\"]?", "[REDACTED-SECRET]"),
+    # Connection strings (postgres, mysql, mongodb, redis)
+    (r"(?i)(?:postgresql|postgres|mysql|mongodb|redis)://[^\s\"'<>]{5,}", "[REDACTED-CONNSTR]"),
+    # AWS access key IDs (20-char AKIA...)
+    (r"\bAKIA[A-Z0-9]{16}\b", "[REDACTED-SECRET]"),
+    # NOTE: email addresses are intentionally NOT scrubbed here. An email is not a
+    # credential, and work captures legitimately name colleague/client contacts the
+    # federation consumer may need. Person-level redaction is the excluded-entities
+    # layer's job (scrub_excluded_entities), not the secret scrub's.
+    # Brazilian CPF: only the formatted form 000.000.000-00 (a bare 11-digit run
+    # is NOT scrubbed — it false-positives on order IDs, counts, etc.)
+    (r"\b\d{3}\.\d{3}\.\d{3}-\d{2}\b", "[REDACTED-CPF]"),
+    # Brazilian CNPJ: 00.000.000/0000-00
+    (r"\b\d{2}\.\d{3}\.\d{3}/\d{4}-\d{2}\b", "[REDACTED-CNPJ]"),
+    # Brazilian phone: requires structure — a +55 prefix, parenthesized area
+    # code, or (at minimum) a separator between the two number groups. A bare
+    # 10-11 digit run is NOT matched (it false-positives on IDs/counts, same
+    # class of bug as a bare-digit CPF rule).
+    (r"(?:\+55[\s-]?)?(?:\(\d{2}\)|\d{2})?[\s-]?\d{4,5}[-\s]\d{4}\b", "[REDACTED-PHONE]"),
+    # RFC1918 internal IPs — each class matches a FULL four-octet address.
+    (
+        r"\b(?:"
+        r"10\.\d{1,3}\.\d{1,3}\.\d{1,3}"          # 10.0.0.0/8
+        r"|172\.(?:1[6-9]|2\d|3[01])\.\d{1,3}\.\d{1,3}"  # 172.16.0.0/12
+        r"|192\.168\.\d{1,3}\.\d{1,3}"            # 192.168.0.0/16
+        r")\b",
+        "[REDACTED-INTERNAL-IP]",
+    ),
+]
+
+_COMPILED_SECRETS: list[tuple[re.Pattern, str]] = [
+    (re.compile(pat), repl) for pat, repl in _SECRET_PATTERNS
+]
+
+
+def scrub_secrets(body: str) -> tuple[str, int]:
+    """Deterministically redact secrets and PII from body text.
+
+    Applies _SECRET_PATTERNS in order. Returns (scrubbed_body, total_count).
+    If body is empty or patterns produce no matches, returns (body, 0).
+    Stdlib only — no .venv dependency.
+    """
+    result = body
+    total = 0
+    for pattern, replacement in _COMPILED_SECRETS:
+        new_result, n = pattern.subn(replacement, result)
+        result = new_result
+        total += n
+    return result, total

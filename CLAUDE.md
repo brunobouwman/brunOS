@@ -120,6 +120,15 @@ uv run python .claude/skills/weekly-review/scripts/aggregate_week.py [--week YYY
 uv run python .claude/scripts/heartbeat.py [--dry-run] [--no-agent] [--force]
 uv run python .claude/scripts/memory_reflect.py [--dry-run] [--inbox-only] [--skip-inbox] [--project <slug>]
 
+# Privacy gate canary test (CI gate — must pass before any BaaS pilot):
+uv run python tests/test_privacy_gate.py
+
+# Federation-doctor — per-inbox observability:
+uv run python .claude/scripts/federation_doctor.py
+uv run python .claude/scripts/federation_doctor.py --inbox <slug>
+uv run python .claude/scripts/federation_doctor.py --canary    # also runs canary tests
+uv run python .claude/scripts/federation_doctor.py --json      # machine-readable
+
 # Phase 7 — Slack chat bot:
 uv run python .claude/chat/bot.py --smoke-test     # connect + auth.test, exit 0
 uv run python .claude/chat/bot.py                  # foreground daemon (Ctrl+C to stop)
@@ -301,6 +310,8 @@ Never `systemctl stop lisaosbrain-*`, never `DROP ROLE lisaosbrain`, never edit 
 - [x] Phase 7 — Slack chat bot (2026-05-03)
 - [x] Phase 8 — Security hardening (4 layers) (2026-05-03)
 - [x] Phase 9 — Deployment (VPS systemd primary on `LinOS`/49.13.165.23; Mac launchd installed-but-disabled for failover; vault git-sync to `brunobouwman/brunOS-Vault`) (2026-05-19)
+- [x] BaaS Track C — Org/onboarding layer (access policy, excluded-entities gate, `validate_consumer_read`) (2026-05-31)
+- [x] BaaS Track B — Deterministic security gate (L1 structural separation, L2 secret/PII scrub + fail-closed, L4 canary CI gate, L6 federation-doctor) (2026-05-31)
 - [ ] Phase C.5 — LinOS consumer loop (BaaS Track A): `linos_consumer.py` +
   `linosbrain-*` systemd node on VPS (own user `linos`, repo
   `/home/linos/claude-second-brain`, vault `/home/linos/LinOS`, logs

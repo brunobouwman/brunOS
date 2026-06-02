@@ -40,10 +40,18 @@ from shared import (  # noqa: E402
     load_env,
     load_state,
     now_brt,
+    parse_capture as _parse_capture,
+    parse_iso as _parse_iso,
+    read_text as _read_text,
     save_state,
     vault_path,
 )
-from sanitize import wrap_external, load_excluded_entities, scrub_excluded_entities  # noqa: E402
+from sanitize import (  # noqa: E402
+    wrap_external,
+    load_excluded_entities,
+    scrub_excluded_entities,
+    scrub_secrets,
+)
 
 load_env()
 
@@ -64,6 +72,11 @@ INBOX_CAPTURES_PER_BATCH = 8  # captures per Sonnet call; watermark advances per
                               # so a timeout mid-project still persists prior batches
 
 SONNET_MODEL = "claude-sonnet-4-6"
+
+# Only captures with these share_status values may proceed through the strip pipeline.
+# "cleared" is already caught by the idempotency guard. Unknown values
+# (e.g. "quarantined", "error", future states) → refuse to clear (fail-closed).
+_STRIP_OPEN_STATUSES = {None, "", "active"}
 
 REFLECTION_SYSTEM_PROMPT = """You distil yesterday's daily log into durable memory for BrunOS. Output a JSON array, no preamble, no fenced blocks:
 
@@ -191,49 +204,9 @@ def _yesterday_log_path(now_dt) -> Path:
     return vault_path() / "Memory" / "daily" / f"{_yesterday_str(now_dt)}.md"
 
 
-def _read_text(path: Path) -> str:
-    try:
-        return path.read_text(encoding="utf-8")
-    except OSError:
-        return ""
-
-
 # --- Inbox stage: capture parsing + watermark helpers (Phase 1a) -------------
-
-_SCALAR_FM_RE = re.compile(r"^([A-Za-z0-9_-]+):[ \t]*(.*)$")
-
-
-def _parse_iso(s: str | None) -> datetime | None:
-    """Parse an RFC3339 timestamp (e.g. 2026-05-23T20:47:17-03:00). None on failure."""
-    if not s:
-        return None
-    try:
-        return datetime.fromisoformat(s.strip())
-    except (ValueError, TypeError):
-        return None
-
-
-def _parse_capture(path: Path) -> tuple[dict, str] | None:
-    """Split a capture into (scalar-frontmatter dict, body). None if no frontmatter.
-
-    Only scalar `key: value` fields are captured (block lists like `tags:` are
-    skipped — the stage needs `created`, `project`, `default_export`,
-    `share_status`, `status`, none of which are block lists). Tolerant: malformed
-    files return None so the caller can skip + log.
-    """
-    text = _read_text(path)
-    if not text:
-        return None
-    m = _FM_RE.match(text)
-    if not m:
-        return None
-    body = text[m.end():]
-    fm: dict[str, str] = {}
-    for line in m.group(1).splitlines():
-        sm = _SCALAR_FM_RE.match(line)
-        if sm and sm.group(2).strip():  # skip block-list headers (empty value)
-            fm[sm.group(1)] = sm.group(2).strip()
-    return fm, body
+# _read_text / _parse_iso / _parse_capture are imported from shared (canonical;
+# also used by federation_doctor) — see shared.parse_capture.
 
 
 def _inbox_sessions_dir() -> Path:
@@ -562,6 +535,18 @@ def _strip_and_mark_capture(path: Path, fm: dict, cleaned_body: str) -> None:
     """
     if fm.get("share_status") == "cleared":
         return  # idempotent guard
+
+    # Fail-closed: only process captures with a recognized open share_status.
+    # Anything else (e.g. "quarantined", "error", future states) → refuse to clear,
+    # so an unknown status can never be silently shared with a company-brain consumer.
+    current_status = fm.get("share_status") or ""
+    if current_status not in _STRIP_OPEN_STATUSES:
+        _log(
+            f"  share_status='{current_status}' on {path.name} is not a recognized "
+            f"open status; skipping clear (fail-closed)"
+        )
+        return
+
     text = _read_text(path)
     m = _FM_RE.match(text)
     if not m:
@@ -582,6 +567,17 @@ def _strip_and_mark_capture(path: Path, fm: dict, cleaned_body: str) -> None:
         new_body, n = scrub_excluded_entities(new_body, excluded)
         if n > 0:
             _log(f"  {path.name}: scrubbed {n} excluded-entity mention(s)")
+
+    # Secret / PII deterministic scrub (Track B) — last line of defense before a
+    # capture is marked shareable. Applied after the excluded-entities scrub;
+    # fail-closed on any exception (refuse to clear rather than risk a leak).
+    try:
+        new_body, secret_count = scrub_secrets(new_body)
+        if secret_count:
+            _log(f"  {path.name}: scrub_secrets redacted {secret_count} match(es)")
+    except Exception as e:
+        _log(f"  scrub_secrets failed ({type(e).__name__}: {e}); skipping clear (fail-closed)")
+        return
 
     new_text = f"---\n{new_fm}\n---\n\n{new_body}"
     with file_lock(path):
