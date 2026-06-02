@@ -78,6 +78,19 @@ SONNET_MODEL = "claude-sonnet-4-6"
 # (e.g. "quarantined", "error", future states) → refuse to clear (fail-closed).
 _STRIP_OPEN_STATUSES = {None, "", "active"}
 
+# Terminal share_status values: a capture in one of these is DONE with the inbox
+# stage and is never reprocessed (cleared = shareable; quarantined = permanently
+# withheld). Used by _unprocessed_captures (skip) and the watermark logic (a
+# capture is only "past" once it's terminal — see _process_inbox_batch).
+_TERMINAL_SHARE_STATUSES = {"cleared", "quarantined"}
+
+# A capture the LLM repeatedly fails to clear (omits from cleaned_captures, or the
+# strip pipeline bails on) is force-quarantined after this many attempts so it
+# stops blocking its project's watermark forever. Quarantined captures are NEVER
+# shared (the consumer/transport gate requires share_status == "cleared"), so this
+# is fail-safe for privacy; it surfaces the capture for manual review instead.
+MAX_CLEAR_ATTEMPTS = 3
+
 REFLECTION_SYSTEM_PROMPT = """You distil yesterday's daily log into durable memory for BrunOS. Output a JSON array, no preamble, no fenced blocks:
 
 [
@@ -241,7 +254,7 @@ def _unprocessed_captures(slug: str, watermark_iso: str | None) -> list[Path]:
             _log(f"  inbox[{slug}]: skip malformed capture {p.name}")
             continue
         fm, _ = parsed
-        if fm.get("share_status") == "cleared":
+        if fm.get("share_status") in _TERMINAL_SHARE_STATUSES:
             continue
         created_dt = _parse_iso(fm.get("created"))
         if created_dt is None:
@@ -526,15 +539,19 @@ def _set_share_status_cleared(fm_block: str) -> str:
     return fm_block.rstrip() + "\nshare_status: cleared"
 
 
-def _strip_and_mark_capture(path: Path, fm: dict, cleaned_body: str) -> None:
+def _strip_and_mark_capture(path: Path, fm: dict, cleaned_body: str) -> bool:
     """Rewrite a capture in place: stamp `share_status: cleared`, replace body.
+
+    Returns True iff the capture is now `cleared` (terminal), False if the clear
+    was refused (fail-closed status, missing frontmatter, or a scrub failure) — the
+    caller uses this to decide whether the capture still needs to be retried.
 
     NEVER deletes or moves the file (retirement is a separate, deferred job).
     Operates on the raw frontmatter block (preserves field order + the tags
     block list); `atomic_write` restamps `updated:`.
     """
     if fm.get("share_status") == "cleared":
-        return  # idempotent guard
+        return True  # idempotent guard — already terminal
 
     # Fail-closed: only process captures with a recognized open share_status.
     # Anything else (e.g. "quarantined", "error", future states) → refuse to clear,
@@ -545,13 +562,13 @@ def _strip_and_mark_capture(path: Path, fm: dict, cleaned_body: str) -> None:
             f"  share_status='{current_status}' on {path.name} is not a recognized "
             f"open status; skipping clear (fail-closed)"
         )
-        return
+        return False
 
     text = _read_text(path)
     m = _FM_RE.match(text)
     if not m:
         _log(f"  cannot strip {path.name}: no frontmatter")
-        return
+        return False
     new_fm = _set_share_status_cleared(m.group(1))
     new_body = cleaned_body.rstrip() + "\n"
 
@@ -562,7 +579,7 @@ def _strip_and_mark_capture(path: Path, fm: dict, cleaned_body: str) -> None:
         excluded = frozenset()  # no _excluded-people.md → no entities to scrub
     except Exception as e:
         _log(f"  excluded-entities load failed ({type(e).__name__}: {e}); skipping clear (fail-closed)")
-        return
+        return False
     if excluded:
         new_body, n = scrub_excluded_entities(new_body, excluded)
         if n > 0:
@@ -577,11 +594,107 @@ def _strip_and_mark_capture(path: Path, fm: dict, cleaned_body: str) -> None:
             _log(f"  {path.name}: scrub_secrets redacted {secret_count} match(es)")
     except Exception as e:
         _log(f"  scrub_secrets failed ({type(e).__name__}: {e}); skipping clear (fail-closed)")
-        return
+        return False
 
     new_text = f"---\n{new_fm}\n---\n\n{new_body}"
     with file_lock(path):
         atomic_write(path, new_text)
+    return True
+
+
+def _set_fm_scalar(fm_block: str, key: str, value: str) -> str:
+    """Set/insert a scalar `key: value` in a frontmatter block (no delimiters).
+
+    Rewrites an existing line for `key`, else appends at the end of the block.
+    """
+    line = f"{key}: {value}"
+    if re.search(rf"^{re.escape(key)}:", fm_block, re.MULTILINE):
+        return re.sub(rf"^{re.escape(key)}:.*$", line, fm_block,
+                      count=1, flags=re.MULTILINE)
+    return fm_block.rstrip() + "\n" + line
+
+
+def _rewrite_capture_fm(path: Path, **scalars: str) -> bool:
+    """Apply scalar frontmatter updates to a capture in place (body untouched).
+
+    Returns False if the file has no frontmatter. `atomic_write` restamps `updated:`.
+    """
+    text = _read_text(path)
+    m = _FM_RE.match(text)
+    if not m:
+        _log(f"  cannot update {path.name}: no frontmatter")
+        return False
+    fm_block = m.group(1)
+    for k, v in scalars.items():
+        fm_block = _set_fm_scalar(fm_block, k, v)
+    with file_lock(path):
+        atomic_write(path, f"---\n{fm_block}\n---\n{text[m.end():]}")
+    return True
+
+
+def _bump_clear_attempts(path: Path, fm: dict) -> int:
+    """Increment + persist the capture's clear-attempt counter; return the new count."""
+    try:
+        prev = int(fm.get("clear_attempts") or 0)
+    except (TypeError, ValueError):
+        prev = 0
+    n = prev + 1
+    _rewrite_capture_fm(path, clear_attempts=str(n))
+    return n
+
+
+def _quarantine_capture(path: Path, fm: dict) -> None:
+    """Mark a capture `share_status: quarantined` — terminal, never shared.
+
+    The transport + consumer gates require `share_status == "cleared"`, so a
+    quarantined capture is fail-safe (withheld); it surfaces for manual review.
+    """
+    _rewrite_capture_fm(path, share_status="quarantined")
+
+
+def _resolve_capture(
+    path: Path, fm: dict, cleaned_by_name: dict[str, str], label: str
+) -> str:
+    """Drive one capture toward a terminal state this run.
+
+    Returns "cleared", "quarantined", or "open":
+    - Echoed by the LLM and successfully stripped → "cleared" (terminal).
+    - Not echoed, or the strip pipeline refused → bump the attempt counter; once it
+      reaches MAX_CLEAR_ATTEMPTS, force-"quarantine" (terminal). Otherwise "open",
+      so it's retried next run — and the watermark is NOT advanced past it (see
+      _process_inbox_batch), which is the under-clearing fix.
+    """
+    cleaned_body = cleaned_by_name.get(path.name)
+    if cleaned_body is not None and _strip_and_mark_capture(path, fm, cleaned_body):
+        return "cleared"
+    attempts = _bump_clear_attempts(path, fm)
+    if attempts >= MAX_CLEAR_ATTEMPTS:
+        _quarantine_capture(path, fm)
+        _log(f"  inbox[{label}]: ⚠ capture {path.name} not cleared after "
+             f"{attempts} attempts → quarantined (withheld from sharing; review)")
+        return "quarantined"
+    _log(f"  inbox[{label}]: capture {path.name} not cleared "
+         f"(attempt {attempts}/{MAX_CLEAR_ATTEMPTS}); will retry next run")
+    return "open"
+
+
+def _leading_terminal_watermark(
+    flagged: list[tuple[str | None, bool]],
+) -> tuple[str | None, bool]:
+    """Reduce (created, is_terminal) pairs (ascending `created`) to a safe watermark.
+
+    Returns (watermark, all_terminal) where watermark is the newest `created` in
+    the LEADING run of terminal captures — advance only as far as the first still
+    -open capture, NEVER past it (so an uncleared capture stays eligible next run).
+    all_terminal is True iff every capture in the batch reached a terminal state.
+    """
+    watermark: str | None = None
+    for created, term in flagged:
+        if not term:
+            return watermark, False
+        if created and (watermark is None or created > watermark):
+            watermark = created
+    return watermark, True
 
 
 def _record_done(date_str: str) -> None:
@@ -672,16 +785,18 @@ def _run_inbox_stage(dry_run: bool, only_project: str | None = None) -> None:
             _log(f"  inbox[{slug}]: {len(batches)} batch(es) of ≤{INBOX_CAPTURES_PER_BATCH}")
         for bi, batch in enumerate(batches):
             label = slug if len(batches) == 1 else f"{slug} {bi + 1}/{len(batches)}"
-            max_created = _process_inbox_batch(slug, label, batch, memory_path, dry_run)
+            watermark, stop = _process_inbox_batch(slug, label, batch, memory_path, dry_run)
             if dry_run:
                 continue
-            if max_created is None:
-                # Call/parse failure: stop this project, leave watermark; a later
-                # batch must NOT advance past the failed one (would skip it forever).
+            if watermark is not None:
+                state[slug] = watermark
+                save_state(INBOX_WATERMARK_PATH, state)
+                _log(f"  inbox[{label}]: watermark → {watermark}")
+            if stop:
+                # Failure, OR a still-open capture remains in this batch: do NOT
+                # advance into newer batches (would skip the open one). Next run
+                # resumes from the held watermark and retries the open capture(s).
                 break
-            state[slug] = max_created
-            save_state(INBOX_WATERMARK_PATH, state)
-            _log(f"  inbox[{label}]: watermark → {max_created}")
 
 
 def _process_inbox_batch(
@@ -690,19 +805,23 @@ def _process_inbox_batch(
     captures: list[Path],
     memory_path: Path,
     dry_run: bool,
-) -> str | None:
+) -> tuple[str | None, bool]:
     """Process one batch of a project's captures (one Sonnet call → three outputs).
 
-    Returns the newest `created` among captures processed (the watermark to set), or
-    None if the call/parse failed or this was a dry run — in which case the caller
-    leaves the watermark unchanged so the batch is retried next run.
+    Returns (watermark, stop):
+    - watermark: the `created` value to advance the per-slug watermark to, or None
+      to leave it unchanged. It is the newest `created` in the LEADING run of
+      captures that reached a terminal state (cleared/quarantined) — NEVER past a
+      still-open capture, so an under-cleared capture stays eligible next run.
+    - stop: True if the project loop should stop after this batch — on a call/parse
+      failure, OR when a still-open capture remains (advancing into newer batches
+      would skip it). The caller breaks but keeps whatever watermark was returned.
     """
     # Build prompt: existing project doc + each capture body wrapped as external data.
     project_doc_path = vault_path() / "Memory" / "projects" / f"{slug}.md"
     project_doc = _read_text(project_doc_path)
     blocks: list[str] = []
     by_name: dict[str, tuple[Path, dict]] = {}
-    max_created: str | None = None
     for p in captures:
         parsed = _parse_capture(p)
         if parsed is None:
@@ -712,9 +831,6 @@ def _process_inbox_batch(
         blocks.append(
             wrap_external(body, "inbox-capture", project=slug, capture=p.name)
         )
-        created = fm.get("created")
-        if created and (max_created is None or created > max_created):
-            max_created = created
 
     prompt = _build_inbox_prompt(slug, project_doc, blocks)
     _log(f"  inbox[{label}]: calling Sonnet on {len(prompt)}-char prompt")
@@ -722,13 +838,13 @@ def _process_inbox_batch(
         raw = asyncio.run(_reason(prompt, system_prompt=INBOX_SYSTEM_PROMPT))
     except Exception as e:
         _log(f"  inbox[{label}]: call failed ({type(e).__name__}: {e}); skipping (watermark unchanged)")
-        return None
+        return None, True
 
     result = _parse_inbox_result(raw)
     if result is None:
         _log(f"  inbox[{label}]: JSON parse failed; dumping debug, skipping (watermark unchanged)")
         _dump_debug(f"inbox-{slug}", raw)
-        return None
+        return None, True
 
     personal = result["personal"][:PERSONAL_ITEMS_CAP]
     continuity = result["continuity"]
@@ -747,7 +863,7 @@ def _process_inbox_batch(
         }, indent=2, ensure_ascii=False))
         sys.stdout.write("\n")
         _log(f"  inbox[{label}]: dry-run; no writes, watermark unchanged")
-        return None
+        return None, False
 
     # 1) Personal → MEMORY.md (decision/lesson/fact/status only; cap-guarded).
     appendable = [
@@ -766,13 +882,31 @@ def _process_inbox_batch(
     if continuity:
         _append_continuity(slug, continuity)
 
-    # 3) Strip-in-place + share_status: cleared per matched capture.
-    for c in matched_cleaned:
-        p, fm = by_name[c["capture"]]
-        _strip_and_mark_capture(p, fm, c["body"])
-    _log(f"  inbox[{label}]: cleared {len(matched_cleaned)} capture(s) in place")
+    # 3) Strip-in-place per echoed capture; bump/quarantine the rest. The watermark
+    #    must NOT advance past a still-open capture (the under-clearing bug: an
+    #    omitted capture would be left below the cursor → skipped forever). Resolve
+    #    each capture, then advance only over the leading run of terminal ones.
+    cleaned_by_name = {c["capture"]: c["body"] for c in matched_cleaned}
+    flagged: list[tuple[str | None, bool]] = []
+    counts = {"cleared": 0, "quarantined": 0, "open": 0}
+    for p in captures:
+        entry = by_name.get(p.name)
+        if entry is None:
+            flagged.append((None, True))  # malformed/unparsed: skip past, never block
+            continue
+        pp, fm = entry
+        status = _resolve_capture(pp, fm, cleaned_by_name, label)
+        counts[status] += 1
+        flagged.append((fm.get("created"), status != "open"))
 
-    return max_created
+    watermark, all_terminal = _leading_terminal_watermark(flagged)
+    msg = f"  inbox[{label}]: cleared {counts['cleared']}/{len(captures)} in place"
+    if counts["quarantined"]:
+        msg += f", quarantined {counts['quarantined']}"
+    if counts["open"]:
+        msg += f", {counts['open']} still open (watermark held to retry)"
+    _log(msg)
+    return watermark, not all_terminal
 
 
 def _run_daily_stage(dry_run: bool) -> int:
