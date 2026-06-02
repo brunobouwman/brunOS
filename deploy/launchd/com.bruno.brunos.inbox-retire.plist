@@ -1,0 +1,66 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.bruno.brunos.inbox-retire</string>
+
+    <!-- Producer-side retirement: delete local Memory/_inbox/ captures once the
+         VPS holds them in a terminal status (cleared/quarantined). The Mac is the
+         capture origin and _inbox/ is gitignored + rsynced one-way, so the cleared
+         status never returns; without this the Mac accumulates stale `active`
+         captures and is a failover-duplication hazard. Counterpart to the VPS
+         retirement job.
+
+         DISABLED by default: review dry-runs first (the script defaults to dry-run;
+         this unit passes --apply). Enable only after you trust the dry-run output:
+           cp deploy/launchd/com.bruno.brunos.inbox-retire.plist ~/Library/LaunchAgents/
+           # set Disabled to false, then:
+           launchctl load ~/Library/LaunchAgents/com.bruno.brunos.inbox-retire.plist
+         The script is fail-safe (never deletes if the VPS is unreachable or its
+         terminal set is empty). -->
+    <key>Disabled</key>
+    <true/>
+
+    <key>RunAtLoad</key>
+    <false/>
+
+    <key>WorkingDirectory</key>
+    <string>/Users/brunobouwman/Documents/claude-second-brain</string>
+
+    <!-- Run via uv (Full Disk Access granted for codex-watcher) so launchd can
+         read the ~/Documents-resident vault despite macOS TCC. uv also lets the
+         ssh child inherit FDA for reading ~/.ssh. -->
+    <key>ProgramArguments</key>
+    <array>
+        <string>/Users/brunobouwman/.local/bin/uv</string>
+        <string>run</string>
+        <string>python</string>
+        <string>deploy/bin/retire_local_inbox.py</string>
+        <string>--apply</string>
+    </array>
+
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>TZ</key>
+        <string>America/Sao_Paulo</string>
+        <key>PATH</key>
+        <string>/usr/local/bin:/opt/homebrew/bin:/usr/bin:/bin</string>
+    </dict>
+
+    <key>StandardOutPath</key>
+    <string>/Users/brunobouwman/Library/Logs/com.bruno.brunos.inbox-retire.log</string>
+    <key>StandardErrorPath</key>
+    <string>/Users/brunobouwman/Library/Logs/com.bruno.brunos.inbox-retire.log</string>
+
+    <!-- Daily, well after the VPS reflect (08:00) + cleared-push cadence so the
+         VPS terminal set is fresh before the Mac retires against it. -->
+    <key>StartCalendarInterval</key>
+    <dict>
+        <key>Hour</key>
+        <integer>11</integer>
+        <key>Minute</key>
+        <integer>30</integer>
+    </dict>
+</dict>
+</plist>
