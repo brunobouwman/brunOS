@@ -181,6 +181,52 @@ def _stamp_updated(content: str, ts: str) -> str:
     return content[: m.start()] + f"---\n{new_fm}\n---\n" + content[m.end() :]
 
 
+# --- Capture / frontmatter parsing (shared by memory_reflect + federation_doctor) ---
+
+_SCALAR_FM_RE = re.compile(r"^([A-Za-z0-9_-]+):[ \t]*(.*)$")
+
+
+def read_text(path: os.PathLike[str] | str) -> str:
+    """Read a file as UTF-8; return "" on any OSError (missing/unreadable)."""
+    try:
+        return Path(path).read_text(encoding="utf-8")
+    except OSError:
+        return ""
+
+
+def parse_iso(s: str | None) -> datetime | None:
+    """Parse an RFC3339 timestamp (e.g. 2026-05-23T20:47:17-03:00). None on failure."""
+    if not s:
+        return None
+    try:
+        return datetime.fromisoformat(s.strip())
+    except (ValueError, TypeError):
+        return None
+
+
+def parse_capture(path: os.PathLike[str] | str) -> tuple[dict, str] | None:
+    """Split a capture into (scalar-frontmatter dict, body). None if no frontmatter.
+
+    Only scalar `key: value` fields are captured (block lists like `tags:` are
+    skipped — callers need `created`, `project`, `default_export`, `share_status`,
+    `status`, none of which are block lists). Tolerant: malformed files return
+    None so the caller can skip + log.
+    """
+    text = read_text(path)
+    if not text:
+        return None
+    m = _FM_RE.match(text)
+    if not m:
+        return None
+    body = text[m.end():]
+    fm: dict[str, str] = {}
+    for line in m.group(1).splitlines():
+        sm = _SCALAR_FM_RE.match(line)
+        if sm and sm.group(2).strip():  # skip block-list headers (empty value)
+            fm[sm.group(1)] = sm.group(2).strip()
+    return fm, body
+
+
 def atomic_write(
     path: os.PathLike[str] | str,
     content: str,
