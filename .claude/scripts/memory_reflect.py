@@ -60,6 +60,8 @@ INBOX_WATERMARK_PATH = STATE_DIR / "inbox_reflection.json"  # {"<slug>": "<last 
 PROJECT_DOC_CAP_BYTES = 8192  # cap for projects/<slug>.md before compaction
 CONTINUITY_HEADER = "## Auto-consolidated continuity"
 PERSONAL_ITEMS_CAP = 8  # max personal promotions accepted per project / run
+INBOX_CAPTURES_PER_BATCH = 8  # captures per Sonnet call; watermark advances per batch
+                              # so a timeout mid-project still persists prior batches
 
 SONNET_MODEL = "claude-sonnet-4-6"
 
@@ -649,86 +651,118 @@ def _run_inbox_stage(dry_run: bool, only_project: str | None = None) -> None:
             continue
         _log(f"  inbox[{slug}]: {len(captures)} new capture(s)")
 
-        # Build prompt: existing project doc + each capture body wrapped as external data.
-        project_doc_path = vault_path() / "Memory" / "projects" / f"{slug}.md"
-        project_doc = _read_text(project_doc_path)
-        blocks: list[str] = []
-        by_name: dict[str, tuple[Path, dict]] = {}
-        max_created: str | None = watermark
-        for p in captures:
-            parsed = _parse_capture(p)
-            if parsed is None:
-                continue
-            fm, body = parsed
-            by_name[p.name] = (p, fm)
-            blocks.append(
-                wrap_external(body, "inbox-capture", project=slug, capture=p.name)
-            )
-            created = fm.get("created")
-            if created and (max_created is None or created > max_created):
-                max_created = created
-
-        prompt = _build_inbox_prompt(slug, project_doc, blocks)
-        _log(f"  inbox[{slug}]: calling Sonnet on {len(prompt)}-char prompt")
-        try:
-            raw = asyncio.run(_reason(prompt, system_prompt=INBOX_SYSTEM_PROMPT))
-        except Exception as e:
-            _log(f"  inbox[{slug}]: call failed ({type(e).__name__}: {e}); skipping (watermark unchanged)")
-            continue
-
-        result = _parse_inbox_result(raw)
-        if result is None:
-            _log(f"  inbox[{slug}]: JSON parse failed; dumping debug, skipping (watermark unchanged)")
-            _dump_debug(f"inbox-{slug}", raw)
-            continue
-
-        personal = result["personal"][:PERSONAL_ITEMS_CAP]
-        continuity = result["continuity"]
-        cleaned = result["cleaned_captures"]
-        matched_cleaned = [c for c in cleaned if c["capture"] in by_name]
-        for c in cleaned:
-            if c["capture"] not in by_name:
-                _log(f"  inbox[{slug}]: cleaned capture '{c['capture']}' did not match any input; ignoring")
-
-        if dry_run:
-            sys.stdout.write(json.dumps({
-                "project": slug,
-                "personal": personal,
-                "continuity": continuity,
-                "would_clear": [c["capture"] for c in matched_cleaned],
-            }, indent=2, ensure_ascii=False))
-            sys.stdout.write("\n")
-            _log(f"  inbox[{slug}]: dry-run; no writes, watermark unchanged")
-            continue
-
-        # 1) Personal → MEMORY.md (decision/lesson/fact/status only; cap-guarded).
-        appendable = [
-            p for p in personal
-            if p.get("promote") and p.get("type") != "soul-suggestion"
+        # Process in bounded batches (ascending by `created`) so each Sonnet call
+        # stays small AND a mid-project timeout still persists completed batches:
+        # the watermark advances after every batch. Next run resumes from it.
+        batches = [
+            captures[i:i + INBOX_CAPTURES_PER_BATCH]
+            for i in range(0, len(captures), INBOX_CAPTURES_PER_BATCH)
         ]
-        if appendable:
-            mem = _read_text(memory_path)
-            new_mem = _append_promotions(mem, appendable)
-            new_mem = _compact_if_over_cap(new_mem)
-            with file_lock(memory_path):
-                atomic_write(memory_path, new_mem)
-            _log(f"  inbox[{slug}]: appended {len(appendable)} personal item(s) to MEMORY.md")
-
-        # 2) Continuity → projects/<slug>.md.
-        if continuity:
-            _append_continuity(slug, continuity)
-
-        # 3) Strip-in-place + share_status: cleared per matched capture.
-        for c in matched_cleaned:
-            p, fm = by_name[c["capture"]]
-            _strip_and_mark_capture(p, fm, c["body"])
-        _log(f"  inbox[{slug}]: cleared {len(matched_cleaned)} capture(s) in place")
-
-        # Advance watermark to the newest capture processed.
-        if max_created:
+        if len(batches) > 1:
+            _log(f"  inbox[{slug}]: {len(batches)} batch(es) of ≤{INBOX_CAPTURES_PER_BATCH}")
+        for bi, batch in enumerate(batches):
+            label = slug if len(batches) == 1 else f"{slug} {bi + 1}/{len(batches)}"
+            max_created = _process_inbox_batch(slug, label, batch, memory_path, dry_run)
+            if dry_run:
+                continue
+            if max_created is None:
+                # Call/parse failure: stop this project, leave watermark; a later
+                # batch must NOT advance past the failed one (would skip it forever).
+                break
             state[slug] = max_created
             save_state(INBOX_WATERMARK_PATH, state)
-            _log(f"  inbox[{slug}]: watermark → {max_created}")
+            _log(f"  inbox[{label}]: watermark → {max_created}")
+
+
+def _process_inbox_batch(
+    slug: str,
+    label: str,
+    captures: list[Path],
+    memory_path: Path,
+    dry_run: bool,
+) -> str | None:
+    """Process one batch of a project's captures (one Sonnet call → three outputs).
+
+    Returns the newest `created` among captures processed (the watermark to set), or
+    None if the call/parse failed or this was a dry run — in which case the caller
+    leaves the watermark unchanged so the batch is retried next run.
+    """
+    # Build prompt: existing project doc + each capture body wrapped as external data.
+    project_doc_path = vault_path() / "Memory" / "projects" / f"{slug}.md"
+    project_doc = _read_text(project_doc_path)
+    blocks: list[str] = []
+    by_name: dict[str, tuple[Path, dict]] = {}
+    max_created: str | None = None
+    for p in captures:
+        parsed = _parse_capture(p)
+        if parsed is None:
+            continue
+        fm, body = parsed
+        by_name[p.name] = (p, fm)
+        blocks.append(
+            wrap_external(body, "inbox-capture", project=slug, capture=p.name)
+        )
+        created = fm.get("created")
+        if created and (max_created is None or created > max_created):
+            max_created = created
+
+    prompt = _build_inbox_prompt(slug, project_doc, blocks)
+    _log(f"  inbox[{label}]: calling Sonnet on {len(prompt)}-char prompt")
+    try:
+        raw = asyncio.run(_reason(prompt, system_prompt=INBOX_SYSTEM_PROMPT))
+    except Exception as e:
+        _log(f"  inbox[{label}]: call failed ({type(e).__name__}: {e}); skipping (watermark unchanged)")
+        return None
+
+    result = _parse_inbox_result(raw)
+    if result is None:
+        _log(f"  inbox[{label}]: JSON parse failed; dumping debug, skipping (watermark unchanged)")
+        _dump_debug(f"inbox-{slug}", raw)
+        return None
+
+    personal = result["personal"][:PERSONAL_ITEMS_CAP]
+    continuity = result["continuity"]
+    cleaned = result["cleaned_captures"]
+    matched_cleaned = [c for c in cleaned if c["capture"] in by_name]
+    for c in cleaned:
+        if c["capture"] not in by_name:
+            _log(f"  inbox[{label}]: cleaned capture '{c['capture']}' did not match any input; ignoring")
+
+    if dry_run:
+        sys.stdout.write(json.dumps({
+            "project": slug,
+            "personal": personal,
+            "continuity": continuity,
+            "would_clear": [c["capture"] for c in matched_cleaned],
+        }, indent=2, ensure_ascii=False))
+        sys.stdout.write("\n")
+        _log(f"  inbox[{label}]: dry-run; no writes, watermark unchanged")
+        return None
+
+    # 1) Personal → MEMORY.md (decision/lesson/fact/status only; cap-guarded).
+    appendable = [
+        p for p in personal
+        if p.get("promote") and p.get("type") != "soul-suggestion"
+    ]
+    if appendable:
+        mem = _read_text(memory_path)
+        new_mem = _append_promotions(mem, appendable)
+        new_mem = _compact_if_over_cap(new_mem)
+        with file_lock(memory_path):
+            atomic_write(memory_path, new_mem)
+        _log(f"  inbox[{label}]: appended {len(appendable)} personal item(s) to MEMORY.md")
+
+    # 2) Continuity → projects/<slug>.md.
+    if continuity:
+        _append_continuity(slug, continuity)
+
+    # 3) Strip-in-place + share_status: cleared per matched capture.
+    for c in matched_cleaned:
+        p, fm = by_name[c["capture"]]
+        _strip_and_mark_capture(p, fm, c["body"])
+    _log(f"  inbox[{label}]: cleared {len(matched_cleaned)} capture(s) in place")
+
+    return max_created
 
 
 def _run_daily_stage(dry_run: bool) -> int:

@@ -12,7 +12,10 @@ EnvironmentFile=/home/bruno/claude-second-brain/.claude/.env
 Environment=TZ=America/Sao_Paulo
 Environment=PATH=/usr/local/bin:/usr/bin:/bin
 ExecStart=/usr/local/bin/uv run python .claude/scripts/memory_reflect.py
-TimeoutStartSec=600
+# 30 min: the inbox stage now batches captures and advances its watermark per
+# batch, so a timeout is non-destructive — extra runway lets a backlog drain in
+# one run. (Was 600s, which SIGTERM'd mid-Sonnet and stalled the vertik inbox.)
+TimeoutStartSec=1800
 LogsDirectory=brunoosbrain
 StandardOutput=append:/var/log/brunoosbrain/reflect.log
 StandardError=append:/var/log/brunoosbrain/reflect.log
