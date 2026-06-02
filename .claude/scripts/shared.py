@@ -247,7 +247,8 @@ def validate_consumer_read(capture_fm: dict, consumer: str) -> bool:
     """Return True iff capture's default_export is in the declared scope for consumer.
 
     Unknown consumers are denied (fail-closed). Does NOT check share_status —
-    the consuming brain is responsible for that gate.
+    the consuming brain is responsible for that gate (see linos_consumer.py,
+    which skips any capture whose share_status != "cleared").
     """
     allowed = CONSUMER_READ_SCOPES.get(consumer)
     if allowed is None:

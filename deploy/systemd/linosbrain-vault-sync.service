@@ -1,0 +1,19 @@
+[Unit]
+Description=linosbrain vault git-sync (LinOS/ ↔ GitHub)
+After=network-online.target
+Wants=network-online.target
+OnFailure=linosbrain-alert@%n.service
+
+[Service]
+Type=oneshot
+User=linos
+Group=linos
+WorkingDirectory=/home/linos/claude-second-brain
+EnvironmentFile=/home/linos/claude-second-brain/.claude/.env
+Environment=TZ=America/Sao_Paulo
+Environment=PATH=/usr/local/bin:/usr/bin:/bin
+ExecStart=/usr/local/bin/uv run python .claude/scripts/vault_sync.py
+TimeoutStartSec=120
+LogsDirectory=linosbrain
+StandardOutput=append:/var/log/linosbrain/vault-sync.log
+StandardError=append:/var/log/linosbrain/vault-sync.log

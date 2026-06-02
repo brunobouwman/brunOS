@@ -1,0 +1,19 @@
+[Unit]
+Description=linosbrain consumer — drain BrunOS cleared captures into LinOS vault
+After=network-online.target
+Wants=network-online.target
+OnFailure=linosbrain-alert@%n.service
+
+[Service]
+Type=oneshot
+User=linos
+Group=linos
+WorkingDirectory=/home/linos/claude-second-brain
+EnvironmentFile=/home/linos/claude-second-brain/.claude/.env
+Environment=TZ=America/Sao_Paulo
+Environment=PATH=/usr/local/bin:/usr/bin:/bin
+ExecStart=/usr/local/bin/uv run python .claude/scripts/linos_consumer.py
+TimeoutStartSec=600
+LogsDirectory=linosbrain
+StandardOutput=append:/var/log/linosbrain/consumer.log
+StandardError=append:/var/log/linosbrain/consumer.log
