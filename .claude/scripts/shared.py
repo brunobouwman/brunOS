@@ -396,7 +396,12 @@ def write_inbox_capture(
     these up on its own cadence.
     """
     dt = dt or now_brt()
-    project_slug = _slug(project)
+    # Canonicalize at the write boundary so NO caller can split a repo across
+    # inbox folders: an explicit --project flag (e.g. a Codex precompact hook
+    # passing --project=vertik-lab-agent) bypasses path-derivation's
+    # canonicalize_slug, so apply it here too — this is the single chokepoint
+    # every capture passes through.
+    project_slug = canonicalize_slug(_slug(project)) or _slug(project)
     if default_export not in _VALID_EXPORT_TARGETS:
         default_export = "personal"
     sid_short = (session_id or "unknown").replace("-", "")[:8] or "unknown"
