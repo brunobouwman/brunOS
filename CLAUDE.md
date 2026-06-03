@@ -142,6 +142,10 @@ uv run python .claude/chat/bot.py                  # foreground daemon (Ctrl+C t
 # Track D Phase 1 — monitoring probes (both support --dry-run = no reporting):
 uv run python .claude/scripts/slackbot_watchdog.py [--dry-run] [--skip-smoke] [--unit NAME]
 uv run python .claude/scripts/memory_doctor.py [--dry-run] [--skip-canary] [--staleness-hours N]
+
+# Track D Phase 2 — provision healthchecks.io checks for a brain (idempotent upsert):
+HEALTHCHECKS_API_KEY=<project-rw-key> uv run python .claude/scripts/provision_healthchecks.py \
+    --brain <id> --host <label> [--services a,b,c] [--dry-run] [--json]
 ```
 
 Hooks in `.claude/settings.json` invoke scripts via `uv run python ...` so they pick up the project's `.venv` regardless of cwd or whether the venv is activated.
@@ -273,7 +277,9 @@ PRD: `BrunOS/Memory/projects/Brain/monitoring-observability-prd.md`. Backbone de
 - **slackbot_watchdog.py** (NEW, 15-min timer) — unit-down / restart-storm (NRestarts delta ≥3) / duplicate-instance (Socket Mode broadcast!) / auth.test token check. **Failover: stop the watchdog timer with the bot** or set `BRUNOS_SLACKBOT_WATCHDOG_DISABLED=1`.
 - **memory_doctor.py** (NEW, daily 09:15 BRT) — sqlite quick_check + index freshness (newest vault .md mtime vs memory.db mtime, 3h threshold) + end-to-end search canary (known query must return ≥1 result). Catches "brain can't do memory search", previously invisible.
 
-Conventions: reporting lives at the CLI boundary (`main()`), never in library functions; dry-runs never report; `BRUNOS_DISABLE_REPORTING=1` disables everything (tests); reporting failures never break the job they observe. `make_reporter(service, env)` / `report_outcome(...)` in `sync_common.py` are the one-call helpers. Phase 2 (onboarding provisioning via the healthchecks API) and Phase 3 (thin fleet page) are ClickUp-tracked, not yet built.
+Conventions: reporting lives at the CLI boundary (`main()`), never in library functions; dry-runs never report; `BRUNOS_DISABLE_REPORTING=1` disables everything (tests); reporting failures never break the job they observe. `make_reporter(service, env)` / `report_outcome(...)` in `sync_common.py` are the one-call helpers.
+
+**Phase 2 — onboarding provisioning** (`provision_healthchecks.py`): one command per brain×host upserts the checks via the healthchecks.io v3 API (`unique:["name"]` → idempotent), applies the naming/tag/grace conventions from `SERVICE_CATALOG`, and emits the env block for the instance's `.env`. Model: one Protostack healthchecks account, **one project per brain** (API keys are project-scoped — the key selects the brain), alerts via project integrations (`channels:"*"`) into the shared Protostack ops channel. **Provision only instrumented services** (a check nothing pings = permanent red): probes-first starter is `memory-doctor,slackbot-watchdog` (external probes, zero changes to a brain's existing scripts). First dogfood: LisaOS — runbook at `projects/Brain/lisaos-monitoring-onboarding.md` (vault); the BrunOS↔LisaOS boundary holds: Bruno provisions, Lisa instruments her side. Phase 3 (thin fleet page over the healthchecks API) is ClickUp-tracked, TBD.
 
 ## Deployment (Phase 9)
 
