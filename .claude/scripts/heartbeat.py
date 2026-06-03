@@ -58,6 +58,7 @@ import habits  # noqa: E402
 from integrations import calendar as gcal  # noqa: E402
 from integrations import clickup, github, gmail, rss, slack  # noqa: E402
 from integrations.registry import enabled, find  # noqa: E402
+from sync_common import SyncReporter  # noqa: E402
 
 LAST_RUN_PATH = STATE_DIR / "heartbeat-last-run.json"
 
@@ -646,6 +647,47 @@ def _persist_last_run(delta: dict, signals: dict[str, bool], status: str) -> Non
     )
 
 
+# --- Tick outcome reporting (Track D Phase 1) ---
+#
+# Before this, a failed heartbeat surfaced only via osascript notify (Mac-only)
+# and the daily log — a dead tick on the VPS was invisible. Every real run now
+# reports through the shared SyncReporter: status file + rate-limited Slack
+# alert + healthchecks.io dead-man's-switch (ping carries the status body).
+# NB: heartbeat-state.json is the SNAPSHOT file (heartbeat_snapshot.py), so the
+# monitor state lives in heartbeat-monitor-state.json.
+
+TICK_OK_STATUSES = {"ok", "fast-path", "no-agent"}
+
+
+def _tick_reporter() -> SyncReporter:
+    return SyncReporter(
+        service="heartbeat",
+        status_file=STATE_DIR / "heartbeat-monitor-state.json",
+        lock_file=STATE_DIR / "locks" / "heartbeat.run.lock",
+        healthcheck_env="BRUNOS_HEARTBEAT_HEALTHCHECK_URL",
+    )
+
+
+def _record_tick(status: str, detail: str = "", delta: dict | None = None) -> None:
+    """Report the tick outcome. ok/fast-path/no-agent → success; everything else
+    (guardrail-blocked / agent-error / gather-error / crash) → failure + alert.
+    A blocked injection attempt is deliberately an ALERT, not a quiet log line.
+    Never raises — reporting must not break the tick."""
+    try:
+        reporter = _tick_reporter()
+        state = reporter.load()
+        ts = _ts_brt()
+        state["tick_status"] = status
+        if delta is not None:
+            state["delta_counts"] = _delta_summary(delta)
+        if status in TICK_OK_STATUSES:
+            reporter.record_success(state, ts, extra={"tick_status": status})
+        else:
+            reporter.record_failure(state, ts, kind=status, msg=detail or status)
+    except Exception as e:  # noqa: BLE001
+        _log(f"  tick reporting failed (non-fatal): {type(e).__name__}: {e}")
+
+
 # --- Main flow ---
 
 
@@ -662,6 +704,8 @@ def _run(dry_run: bool, no_agent: bool, force: bool) -> int:
         gathered = asyncio.run(_gather())
     except Exception as e:
         _log(f"  gather failed catastrophically: {type(e).__name__}: {e}")
+        if not dry_run:
+            _record_tick("gather-error", f"{type(e).__name__}: {e}")
         return 1
     _log(
         "  gathered: "
@@ -705,6 +749,7 @@ def _run(dry_run: bool, no_agent: bool, force: bool) -> int:
         _log("stage 5: --no-agent; deterministic stages done; skipping SDK calls")
         if not dry_run:
             _persist_last_run(delta, signals, "no-agent")
+            _record_tick("no-agent", delta=delta)
         return 0
 
     # Stage 5b: empty-delta fast-path
@@ -726,6 +771,7 @@ def _run(dry_run: bool, no_agent: bool, force: bool) -> int:
             except Exception as e:
                 _log(f"  daily log append failed: {type(e).__name__}: {e}")
             _persist_last_run(delta, signals, "fast-path")
+            _record_tick("fast-path", delta=delta)
             _notify("BrunOS heartbeat", sync_warn or "No changes")
         return 0
 
@@ -766,6 +812,7 @@ def _run(dry_run: bool, no_agent: bool, force: bool) -> int:
         except Exception as e:
             _log(f"  daily log append failed: {type(e).__name__}: {e}")
         _persist_last_run(delta, signals, "blocked")
+        _record_tick("guardrail-blocked", verdict["reason"], delta=delta)
         _notify("BrunOS heartbeat", "Blocked injection attempt")
         return 0
 
@@ -796,12 +843,14 @@ def _run(dry_run: bool, no_agent: bool, force: bool) -> int:
         except Exception:
             pass
         _persist_last_run(delta, signals, "agent-error")
+        _record_tick("agent-error", f"{type(e).__name__}: {e}", delta=delta)
         _notify("BrunOS heartbeat", f"Error: {type(e).__name__}")
         return 0
 
     summary = (agent_output or "tick done").splitlines()[-1][:120]
     _log(f"  agent done; summary: {summary!r}")
     _persist_last_run(delta, signals, "ok")
+    _record_tick("ok", delta=delta)
     sync_warn = _vault_sync_warning()
     _notify("BrunOS heartbeat", f"{sync_warn} | {summary}"[:120] if sync_warn else summary)
     return 0
@@ -842,7 +891,14 @@ def main(argv: list[str]) -> int:
     parser.add_argument("--no-agent", action="store_true", help="run deterministic stages only; skip SDK calls")
     parser.add_argument("--force", action="store_true", help="bypass empty-delta fast-path")
     args = parser.parse_args(argv[1:])
-    return _run(dry_run=args.dry_run, no_agent=args.no_agent, force=args.force)
+    try:
+        return _run(dry_run=args.dry_run, no_agent=args.no_agent, force=args.force)
+    except Exception as e:
+        # Crash backstop: record + alert before the nonzero exit (which also
+        # fires the systemd OnFailure alert unit). Dry-runs stay silent.
+        if not args.dry_run:
+            _record_tick("crash", f"{type(e).__name__}: {e}")
+        raise
 
 
 if __name__ == "__main__":

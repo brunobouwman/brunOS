@@ -1,5 +1,5 @@
 [Unit]
-Description=brunoosbrain heartbeat
+Description=brunoosbrain slackbot watchdog — crash-loop / token / duplicate-instance probe (Track D)
 After=network-online.target
 Wants=network-online.target
 OnFailure=brunoosbrain-alert@%n.service
@@ -12,8 +12,8 @@ WorkingDirectory=/home/bruno/claude-second-brain
 EnvironmentFile=/home/bruno/claude-second-brain/.claude/.env
 Environment=TZ=America/Sao_Paulo
 Environment=PATH=/usr/local/bin:/usr/bin:/bin
-ExecStart=/usr/local/bin/uv run python .claude/scripts/heartbeat.py
-TimeoutStartSec=300
+ExecStart=/usr/local/bin/uv run python .claude/scripts/slackbot_watchdog.py
+TimeoutStartSec=120
 LogsDirectory=brunoosbrain
-StandardOutput=append:/var/log/brunoosbrain/heartbeat.log
-StandardError=append:/var/log/brunoosbrain/heartbeat.log
+StandardOutput=append:/var/log/brunoosbrain/slackbot-watchdog.log
+StandardError=append:/var/log/brunoosbrain/slackbot-watchdog.log

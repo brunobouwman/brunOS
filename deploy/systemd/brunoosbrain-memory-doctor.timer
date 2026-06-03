@@ -1,0 +1,12 @@
+# Daily at 09:15 BRT — after the 08:00 reflect and the 08:00/08:30 heartbeat
+# ticks have reindexed, so a healthy day never trips the 3h staleness window.
+[Unit]
+Description=brunoosbrain memory doctor daily 09:15 BRT
+
+[Timer]
+OnCalendar=*-*-* 09:15:00 America/Sao_Paulo
+RandomizedDelaySec=60
+Persistent=true
+
+[Install]
+WantedBy=timers.target

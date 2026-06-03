@@ -499,8 +499,13 @@ def _run_consumer(
     only_slug: str | None = None,
     brunos_inbox_root: Path = BRUNOS_INBOX_ROOT,
     linos_vault: Path | None = None,
-) -> None:
-    """Drain eligible captures from BrunOS inbox into LinOS vault."""
+) -> dict:
+    """Drain eligible captures from BrunOS inbox into LinOS vault.
+
+    Returns run stats for the Track D reporter:
+    {"slugs": n, "eligible": n, "integrated": n, "failed": n}.
+    """
+    stats = {"slugs": 0, "eligible": 0, "integrated": 0, "failed": 0}
     if linos_vault is None:
         linos_vault = _linos_vault()
 
@@ -519,18 +524,24 @@ def _run_consumer(
         slugs = [s for s in slugs if s == only_slug]
         if not slugs:
             _log(f"consumer: no inbox dir for slug '{only_slug}'")
-            return
+            return stats
 
     for slug in slugs:
         eligible = _eligible_captures(slug, state.get(slug), brunos_inbox_root)
         if not eligible:
             _log(f"  [{slug}] no eligible captures")
             continue
+        stats["slugs"] += 1
+        stats["eligible"] += len(eligible)
         _log(f"  [{slug}] {len(eligible)} eligible capture(s)")
         max_created: str | None = state.get(slug)
         for created_dt, path, fm, body in eligible:
             capture_id = path.stem
             ok = _integrate_one(slug, capture_id, fm, body, linos_vault, dry_run)
+            if ok:
+                stats["integrated"] += 1
+            else:
+                stats["failed"] += 1
             if ok and not dry_run:
                 created_iso = fm.get("created", _ts_brt())
                 if max_created is None or created_iso > max_created:
@@ -539,6 +550,19 @@ def _run_consumer(
             state[slug] = max_created
             save_state(CONSUMER_WATERMARK_PATH, state)
             _log(f"  [{slug}] watermark → {max_created}")
+    return stats
+
+
+def _consumer_reporter():
+    """Track D Phase 1 reporter. Lazy import keeps _run_consumer test-friendly."""
+    from sync_common import SyncReporter
+
+    return SyncReporter(
+        service="linos-consumer",
+        status_file=STATE_DIR / "linos-consumer-state.json",
+        lock_file=STATE_DIR / "locks" / "linos-consumer.run.lock",
+        healthcheck_env="LINOS_CONSUMER_HEALTHCHECK_URL",
+    )
 
 
 def main() -> None:
@@ -558,8 +582,35 @@ def main() -> None:
     )
     args = parser.parse_args()
     _log(f"linos_consumer: start (dry_run={args.dry_run}, slug={args.slug})")
-    _run_consumer(dry_run=args.dry_run, only_slug=args.slug)
-    _log("linos_consumer: done")
+
+    # Track D Phase 1: before this, a dead/degrading consumer was stderr-only.
+    # Real runs report via SyncReporter (status file + Slack + healthchecks.io).
+    # Dry-runs stay silent. Failed captures are retried next run (watermark only
+    # advances past successes), so a transient LLM blip self-heals; the alert is
+    # rate-limited to 1/h per signature by the reporter.
+    report = not args.dry_run
+    reporter = _consumer_reporter() if report else None
+    try:
+        stats = _run_consumer(dry_run=args.dry_run, only_slug=args.slug)
+    except Exception as e:
+        if reporter is not None:
+            reporter.record_failure(
+                reporter.load(), _ts_brt(), kind="crash",
+                msg=f"{type(e).__name__}: {e}",
+            )
+        raise
+    if reporter is not None:
+        state = reporter.load()
+        state["run_stats"] = stats
+        if stats["failed"]:
+            reporter.record_failure(
+                state, _ts_brt(), kind="integration-errors",
+                msg=f"{stats['failed']}/{stats['eligible']} capture(s) failed "
+                    f"across {stats['slugs']} slug(s) — will retry next run",
+            )
+        else:
+            reporter.record_success(state, _ts_brt(), extra={"run_stats": stats})
+    _log(f"linos_consumer: done {json.dumps(stats)}")
 
 
 if __name__ == "__main__":
