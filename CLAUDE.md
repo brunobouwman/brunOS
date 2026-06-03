@@ -84,7 +84,10 @@ uv run python .claude/scripts/memory_flush.py <transcript-path>
 
 # Index / search BrunOS/Memory/ (Phase 3):
 uv run python .claude/scripts/memory_index.py [--full] [--paths file1.md file2.md] [--dry-run]
-uv run python .claude/scripts/memory_search.py "<query>" [--k 10] [--path-prefix drafts/sent]
+uv run python .claude/scripts/memory_search.py "<query>" [--k 10] [--path-prefix drafts/sent] [--no-graph]
+
+# Retrieval eval (C1 BrainBench-lite — graph OFF vs ON, P@5/Recall/MRR):
+uv run python eval/eval.py [--k 10] [--queries eval/queries.jsonl]
 
 # Phase 4 integrations — single dispatcher:
 uv run python .claude/scripts/query.py slack channels
@@ -139,6 +142,12 @@ Hooks in `.claude/settings.json` invoke scripts via `uv run python ...` so they 
 ## Memory search (Phase 3)
 
 Embedding model: `BAAI/bge-small-en-v1.5` via FastEmbed (384-dim, asymmetric — `passage_embed` for indexing, `query_embed` for retrieval). Cache: `.claude/data/fastembed_cache/`. DB: `.claude/data/state/memory.db` (SQLite + sqlite-vec + FTS5; same engine on Mac and VPS — each host keeps its own index, rebuilt from the synced vault). Hybrid retrieval merges vector top-k×3 + FTS top-k×3 via RRF (k=60). The indexer excludes `Memory/personal/finance.md` per the SOUL.md no-financial-data boundary.
+
+### Graph traversal over wikilinks (C1, BaaS retrieval-v2)
+
+The indexer extracts `[[wikilink]]` edges (zero-LLM regex) into an `edges` table (`db.py`); resolution is by basename with Obsidian's "shortest path wins" tiebreak, dangling links skipped. `memory_search` graph-augments **after RRF**: top files by RRF seed a one-hop bidirectional neighbor expansion; a neighbor inherits `GRAPH_BETA × best-chunk score of its strongest connecting seed` (max, not sum — avoids hub domination). **Default is inject-only** (surface linked-but-missed docs into the candidate pool; never reorder existing RRF hits → provably can't regress precision/MRR); `BRUNOS_GRAPH_RERANK=1` opts into lifting already-retrieved siblings. All knobs are env-overridable (`BRUNOS_GRAPH_BETA` default 0.05 = eval-measured sweet spot, `_SEED_FILES`, `_MAX_NEIGHBORS`, `_MAX_CHUNKS`); `--no-graph` / `BRUNOS_SEARCH_NO_GRAPH` disables; graph is skipped when `--path-prefix` scopes to a folder. **`edges` is populated only by a full pass — run `memory_index.py --full` once after deploy** (incremental indexing only refreshes edges for changed files; empty `edges` → graph is a no-op).
+
+Eval harness (`eval/`): `eval.py` runs `eval/queries.jsonl` (labelled, starter set — refine the gold) through search graph-OFF vs ON, reporting file-level P@5 / Recall@k / MRR. On the current 159-file vault the hybrid baseline is near-ceiling (MRR ≈ 0.78, Recall@10 ≈ 0.90), so graph is ~neutral (re-rank helps marginally only at low BETA); it's the gate before any reranker work and a published-benchmark artifact.
 
 ## Integrations (Phase 4)
 
