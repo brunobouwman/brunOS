@@ -1,0 +1,12 @@
+[Unit]
+Description=brunoosbrain federation health doctor — daily 09:00 BRT (after reflection)
+
+[Timer]
+# 09:00: an hour after the 08:00 reflection run, so a stuck/over-cap/quarantine
+# state from this morning's reflection surfaces the same day.
+OnCalendar=*-*-* 09:00 America/Sao_Paulo
+Persistent=true
+Unit=brunoosbrain-federation-doctor.service
+
+[Install]
+WantedBy=timers.target
