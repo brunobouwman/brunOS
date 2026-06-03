@@ -1,0 +1,24 @@
+[Unit]
+Description=brunoosbrain federation health doctor (inbox state dead-man's-switch)
+After=network-online.target
+Wants=network-online.target
+# Backstop alert for a hard crash; the script also self-reports the health
+# verdict via its own SyncReporter (#bruno_ops Slack + healthcheck).
+OnFailure=brunoosbrain-alert@%n.service
+
+[Service]
+Type=oneshot
+User=bruno
+Group=bruno
+WorkingDirectory=/home/bruno/claude-second-brain
+EnvironmentFile=/home/bruno/claude-second-brain/.claude/.env
+Environment=TZ=America/Sao_Paulo
+Environment=PATH=/usr/local/bin:/usr/bin:/bin
+# --alert is VPS-only: it evaluates oldest-uncleared/over-cap/quarantine, which
+# is meaningful only where reflection clears captures (the VPS). The Mac (where
+# captures are never cleared — rsync is one-way) must NOT run --alert.
+ExecStart=/usr/local/bin/uv run python .claude/scripts/federation_doctor.py --alert --json
+TimeoutStartSec=300
+LogsDirectory=brunoosbrain
+StandardOutput=append:/var/log/brunoosbrain/federation-doctor.log
+StandardError=append:/var/log/brunoosbrain/federation-doctor.log

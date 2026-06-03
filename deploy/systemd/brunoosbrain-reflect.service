@@ -2,6 +2,10 @@
 Description=brunoosbrain memory reflection
 After=network-online.target
 Wants=network-online.target
+# Backstop alert for a HARD crash (interpreter/import failure before the script's
+# own SyncReporter path runs). Soft failures (JSON-parse, compaction-over-cap,
+# quarantine) self-report via memory_reflect's per-run verdict.
+OnFailure=brunoosbrain-alert@%n.service
 
 [Service]
 Type=oneshot

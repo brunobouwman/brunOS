@@ -69,10 +69,10 @@ class _Harness:
             self.batch_calls.append((label, list(batch)))
             idx = len(self.batch_calls) - 1
             if dry_run:
-                return (None, False)
+                return (None, False, [])
             if self.fail_on_batch is not None and idx == self.fail_on_batch:
-                return (None, True)  # failure → don't advance, stop the project
-            return (batch[-1], False)  # success → advance to newest, continue
+                return (None, True, ["call_failed"])  # failure → don't advance, stop
+            return (batch[-1], False, [])  # success → advance to newest, continue
 
         self._patch("_process_inbox_batch", _proc)
         return self

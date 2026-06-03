@@ -52,6 +52,7 @@ from sanitize import (  # noqa: E402
     scrub_excluded_entities,
     scrub_secrets,
 )
+from sync_common import SyncReporter  # noqa: E402
 
 load_env()
 
@@ -59,7 +60,13 @@ LAST_REFLECTION_PATH = STATE_DIR / "last_reflection.json"
 DEBUG_DIR = STATE_DIR
 MEMORY_REL = "Memory/MEMORY.md"
 MEMORY_HARD_CAP_BYTES = 5120
-COMPACTION_MIN_RATIO = 0.5  # abort apply if compaction shrinks >50%
+# Compaction sanity floor: abort apply only if the compacted body is below this
+# fraction of the CAP (not of the original) — catches a nuked/garbage LLM return
+# while still allowing the large shrink needed to rescue a doc that bloated well
+# past its cap. (A ratio-of-original guard made an over-cap doc unrescuable: a
+# 24KB→7KB rescue is a >50% shrink, so the old 0.5-of-original rule aborted it
+# every run → permanent deadlock. See projects/vertik.md, 2026-06-03.)
+COMPACTION_FLOOR_RATIO = 0.25  # floor = max(512, cap_bytes * this)
 
 # Inbox stage (federation write-side) — drains per-project session inboxes into
 # the personal brain, a per-project continuity doc, and strips personal asides
@@ -72,6 +79,19 @@ INBOX_CAPTURES_PER_BATCH = 8  # captures per Sonnet call; watermark advances per
                               # so a timeout mid-project still persists prior batches
 
 SONNET_MODEL = "claude-sonnet-4-6"
+
+# Monitoring (BaaS-critical): status file + rate-limited Slack alert to
+# #bruno_ops + healthchecks.io dead-man's-switch, same runtime as the git-syncs.
+# Reports a per-run verdict covering BOTH stages — the federation pipeline must
+# not degrade silently (it did: 2026-06-02 JSON-parse failure + 2026-06-03
+# compaction deadlock both exited 0 with only a WARN). Cross-run state health
+# (stale uncleared captures, over-cap docs) is the federation_doctor's job.
+REFLECT_REPORTER = SyncReporter(
+    service="reflect",
+    status_file=STATE_DIR / "reflect-state.json",
+    lock_file=STATE_DIR / "locks" / "reflect.run.lock",
+    healthcheck_env="BRUNOS_REFLECT_HEALTHCHECK_URL",
+)
 
 # Only captures with these share_status values may proceed through the strip pipeline.
 # "cleared" is already caught by the idempotency guard. Unknown values
@@ -410,8 +430,13 @@ def _compact_if_over_cap(
     cap_bytes: int = MEMORY_HARD_CAP_BYTES,
     *,
     instruction: str = COMPACTION_SYSTEM_PROMPT,
-) -> str:
+) -> tuple[str, bool]:
     """If `memory_text` > `cap_bytes`, run a Sonnet compaction call on the body only.
+
+    Returns (text, still_over_cap): the text to write, and whether it is STILL
+    over `cap_bytes` after the attempt (True on any abort path, or when the
+    compactor failed to get under cap). Callers surface still_over_cap as a soft
+    failure so monitoring can alert instead of letting the doc bloat silently.
 
     Generalized so it caps both MEMORY.md (default cap + MEMORY instruction) and
     projects/<slug>.md (PROJECT_DOC_CAP_BYTES + PROJECT_COMPACTION_INSTRUCTION).
@@ -422,15 +447,16 @@ def _compact_if_over_cap(
     `--system-prompt` — empirically the bundled CLI fails with exit 1 when a
     long markdown body is paired with a long `--system-prompt` arg, even with
     `setting_sources=None` and the SessionStart hook short-circuited. Abort
-    apply on shrink-too-far.
+    apply only when the result is implausibly small (truncated/garbage) — see
+    COMPACTION_FLOOR_RATIO.
     """
     if len(memory_text.encode("utf-8")) <= cap_bytes:
-        return memory_text
+        return memory_text, False
     _log(f"  content over cap ({len(memory_text.encode('utf-8'))}B > {cap_bytes}B) — compacting")
     fm, body = _split_memory(memory_text)
     if not fm:
         _log("  no frontmatter found; aborting compaction")
-        return memory_text
+        return memory_text, True
     combined = (
         "INSTRUCTIONS:\n"
         f"{instruction}\n\n"
@@ -441,20 +467,28 @@ def _compact_if_over_cap(
         compacted_body = asyncio.run(_reason(combined, system_prompt=None))
     except Exception as e:
         _log(f"  compaction call failed: {type(e).__name__}: {e}; keeping original")
-        return memory_text
+        return memory_text, True
     if not compacted_body.strip():
         _log("  compaction returned empty; keeping original")
-        return memory_text
+        return memory_text, True
     if compacted_body.lstrip().startswith("---"):
         _log("  compaction output included frontmatter despite instruction; stripping")
         compacted_body = re.sub(r"\A---\n.*?\n---\n", "", compacted_body, flags=re.DOTALL)
-    if len(compacted_body) < len(body) * COMPACTION_MIN_RATIO:
+    floor = max(512, int(cap_bytes * COMPACTION_FLOOR_RATIO))
+    if len(compacted_body.encode("utf-8")) < floor:
         _log(
-            f"  compaction shrunk too far "
-            f"({len(body)} → {len(compacted_body)}); aborting apply"
+            f"  compaction result {len(compacted_body.encode('utf-8'))}B below floor "
+            f"{floor}B (likely truncated/garbage); aborting apply"
         )
-        return memory_text
-    return fm + compacted_body
+        return memory_text, True
+    result = fm + compacted_body
+    still_over = len(result.encode("utf-8")) > cap_bytes
+    if still_over:
+        _log(
+            f"  compaction applied but still over cap "
+            f"({len(result.encode('utf-8'))}B > {cap_bytes}B)"
+        )
+    return result, still_over
 
 
 def _new_project_doc(slug: str) -> str:
@@ -501,23 +535,26 @@ def _insert_continuity(text: str, bullets: list[str]) -> str:
     return fm + body
 
 
-def _append_continuity(slug: str, bullets: list[str]) -> None:
+def _append_continuity(slug: str, bullets: list[str]) -> bool:
     """Insert continuity bullets into projects/<slug>.md, creating it if absent.
 
     Caps the file to PROJECT_DOC_CAP_BYTES via the generalized compaction (which
-    preserves the hand-written header). Lock-guarded atomic write.
+    preserves the hand-written header). Lock-guarded atomic write. Returns True
+    if the doc is STILL over cap after the compaction attempt (a soft failure
+    the caller surfaces to monitoring).
     """
     if not bullets:
-        return
+        return False
     path = vault_path() / "Memory" / "projects" / f"{slug}.md"
     with file_lock(path):
         text = _read_text(path) if path.exists() else _new_project_doc(slug)
         text = _insert_continuity(text, bullets)
-        text = _compact_if_over_cap(
+        text, over_cap = _compact_if_over_cap(
             text, PROJECT_DOC_CAP_BYTES, instruction=PROJECT_COMPACTION_INSTRUCTION
         )
         atomic_write(path, text)
     _log(f"  inbox[{slug}]: continuity doc updated ({len(text.encode('utf-8'))}B)")
+    return over_cap
 
 
 def _set_share_status_cleared(fm_block: str) -> str:
@@ -737,7 +774,9 @@ def _build_inbox_prompt(slug: str, project_doc: str, capture_blocks: list[str]) 
     )
 
 
-def _run_inbox_stage(dry_run: bool, only_project: str | None = None) -> None:
+def _run_inbox_stage(
+    dry_run: bool, only_project: str | None = None
+) -> list[tuple[str, str]]:
     """Drain per-project session inboxes: one Sonnet call per project, three outputs.
 
     For each project with captures newer than its watermark and not yet cleared:
@@ -748,21 +787,26 @@ def _run_inbox_stage(dry_run: bool, only_project: str | None = None) -> None:
     Then the per-project watermark advances to the newest capture processed.
     Re-run is a no-op (watermark + share_status guard). Idempotent state lives in
     inbox_reflection.json, separate from the daily-log stage's last_reflection.json.
+
+    Returns a list of (slug, fail_kind) for GENUINE soft failures, accumulated
+    across ALL projects (one project's failure never short-circuits the others)
+    so monitoring sees the full picture.
     """
     state = load_state(INBOX_WATERMARK_PATH, default={})
     if not isinstance(state, dict):
         state = {}
 
+    failures: list[tuple[str, str]] = []
     projects = _iter_inbox_projects()
     if only_project:
         only_project = _slug(only_project)
         projects = [p for p in projects if p == only_project]
         if not projects:
             _log(f"  inbox stage: no inbox for project '{only_project}'")
-            return
+            return failures
     if not projects:
         _log("  inbox stage: no project inboxes")
-        return
+        return failures
 
     memory_path = vault_path() / MEMORY_REL
 
@@ -785,7 +829,11 @@ def _run_inbox_stage(dry_run: bool, only_project: str | None = None) -> None:
             _log(f"  inbox[{slug}]: {len(batches)} batch(es) of ≤{INBOX_CAPTURES_PER_BATCH}")
         for bi, batch in enumerate(batches):
             label = slug if len(batches) == 1 else f"{slug} {bi + 1}/{len(batches)}"
-            watermark, stop = _process_inbox_batch(slug, label, batch, memory_path, dry_run)
+            watermark, stop, fails = _process_inbox_batch(
+                slug, label, batch, memory_path, dry_run
+            )
+            for kind in fails:
+                failures.append((slug, kind))
             if dry_run:
                 continue
             if watermark is not None:
@@ -798,6 +846,8 @@ def _run_inbox_stage(dry_run: bool, only_project: str | None = None) -> None:
                 # resumes from the held watermark and retries the open capture(s).
                 break
 
+    return failures
+
 
 def _process_inbox_batch(
     slug: str,
@@ -805,10 +855,10 @@ def _process_inbox_batch(
     captures: list[Path],
     memory_path: Path,
     dry_run: bool,
-) -> tuple[str | None, bool]:
+) -> tuple[str | None, bool, list[str]]:
     """Process one batch of a project's captures (one Sonnet call → three outputs).
 
-    Returns (watermark, stop):
+    Returns (watermark, stop, fails):
     - watermark: the `created` value to advance the per-slug watermark to, or None
       to leave it unchanged. It is the newest `created` in the LEADING run of
       captures that reached a terminal state (cleared/quarantined) — NEVER past a
@@ -816,6 +866,10 @@ def _process_inbox_batch(
     - stop: True if the project loop should stop after this batch — on a call/parse
       failure, OR when a still-open capture remains (advancing into newer batches
       would skip it). The caller breaks but keeps whatever watermark was returned.
+    - fails: GENUINE soft-failure kinds for monitoring (call_failed, json_parse,
+      memory_over_cap, continuity_over_cap, quarantined). A benign still-open hold
+      is conveyed ONLY by `stop`, never as a fail — so the monitor never alerts on
+      a normal retry cycle.
     """
     # Build prompt: existing project doc + each capture body wrapped as external data.
     project_doc_path = vault_path() / "Memory" / "projects" / f"{slug}.md"
@@ -838,13 +892,13 @@ def _process_inbox_batch(
         raw = asyncio.run(_reason(prompt, system_prompt=INBOX_SYSTEM_PROMPT))
     except Exception as e:
         _log(f"  inbox[{label}]: call failed ({type(e).__name__}: {e}); skipping (watermark unchanged)")
-        return None, True
+        return None, True, ["call_failed"]
 
     result = _parse_inbox_result(raw)
     if result is None:
         _log(f"  inbox[{label}]: JSON parse failed; dumping debug, skipping (watermark unchanged)")
         _dump_debug(f"inbox-{slug}", raw)
-        return None, True
+        return None, True, ["json_parse"]
 
     personal = result["personal"][:PERSONAL_ITEMS_CAP]
     continuity = result["continuity"]
@@ -863,9 +917,10 @@ def _process_inbox_batch(
         }, indent=2, ensure_ascii=False))
         sys.stdout.write("\n")
         _log(f"  inbox[{label}]: dry-run; no writes, watermark unchanged")
-        return None, False
+        return None, False, []
 
     # 1) Personal → MEMORY.md (decision/lesson/fact/status only; cap-guarded).
+    mem_over_cap = False
     appendable = [
         p for p in personal
         if p.get("promote") and p.get("type") != "soul-suggestion"
@@ -873,14 +928,15 @@ def _process_inbox_batch(
     if appendable:
         mem = _read_text(memory_path)
         new_mem = _append_promotions(mem, appendable)
-        new_mem = _compact_if_over_cap(new_mem)
+        new_mem, mem_over_cap = _compact_if_over_cap(new_mem)
         with file_lock(memory_path):
             atomic_write(memory_path, new_mem)
         _log(f"  inbox[{label}]: appended {len(appendable)} personal item(s) to MEMORY.md")
 
     # 2) Continuity → projects/<slug>.md.
+    cont_over_cap = False
     if continuity:
-        _append_continuity(slug, continuity)
+        cont_over_cap = _append_continuity(slug, continuity)
 
     # 3) Strip-in-place per echoed capture; bump/quarantine the rest. The watermark
     #    must NOT advance past a still-open capture (the under-clearing bug: an
@@ -906,10 +962,23 @@ def _process_inbox_batch(
     if counts["open"]:
         msg += f", {counts['open']} still open (watermark held to retry)"
     _log(msg)
-    return watermark, not all_terminal
+    # A still-open capture is a benign hold (NOT a failure): the watermark stays
+    # put and we retry next run. Only genuine problems go into `fails` so the
+    # monitor doesn't alert on normal retry cycles.
+    fails: list[str] = []
+    if mem_over_cap:
+        fails.append("memory_over_cap")
+    if cont_over_cap:
+        fails.append("continuity_over_cap")
+    if counts["quarantined"]:
+        fails.append("quarantined")
+    return watermark, not all_terminal, fails
 
 
-def _run_daily_stage(dry_run: bool) -> int:
+def _run_daily_stage(dry_run: bool) -> tuple[int, list[str]]:
+    """Returns (rc, fails) — rc!=0 is a hard failure; `fails` holds soft-failure
+    kinds (daily_call_failed, daily_json_parse, daily_memory_over_cap) for the
+    monitor. A clean no-op skip returns (0, [])."""
     _log(f"reflection (daily-log stage) start ({_ts_brt()})")
     now_dt = now_brt()
     yesterday_str = _yesterday_str(now_dt)
@@ -917,19 +986,19 @@ def _run_daily_stage(dry_run: bool) -> int:
 
     if not yesterday_path.exists():
         _log(f"  no daily log for {yesterday_str}; skipping")
-        return 0
+        return 0, []
 
     last = _last_processed()
     if last == yesterday_str:
         _log(f"  already reflected on {yesterday_str}; skipping (dedup)")
-        return 0
+        return 0, []
 
     yesterday_text = _read_text(yesterday_path)
     if len(yesterday_text.strip()) < 100:
         _log(f"  daily log {yesterday_str} too short ({len(yesterday_text)}B); skipping")
         if not dry_run:
             _record_done(yesterday_str)
-        return 0
+        return 0, []
 
     memory_path = vault_path() / MEMORY_REL
     memory_text = _read_text(memory_path)
@@ -943,13 +1012,13 @@ def _run_daily_stage(dry_run: bool) -> int:
         )
     except Exception as e:
         _log(f"  reflection call failed: {type(e).__name__}: {e}")
-        return 1
+        return 1, ["daily_call_failed"]
 
     promotions = _parse_promotions(raw)
     if promotions is None:
         _log("  reflection JSON parse failed; dumping debug and exiting")
         _dump_debug("sonnet-raw", raw)
-        return 0
+        return 0, ["daily_json_parse"]
 
     promoted = [p for p in promotions if p.get("promote")]
     _log(f"  parsed {len(promotions)} items, {len(promoted)} promoted")
@@ -958,8 +1027,9 @@ def _run_daily_stage(dry_run: bool) -> int:
         sys.stdout.write(json.dumps(promotions, indent=2, ensure_ascii=False))
         sys.stdout.write("\n")
         _log("  dry-run; no vault writes, no state update")
-        return 0
+        return 0, []
 
+    fails: list[str] = []
     if promoted:
         # 1) SOUL suggestions go to today's daily log.
         _surface_soul_suggestions(promoted)
@@ -967,7 +1037,9 @@ def _run_daily_stage(dry_run: bool) -> int:
         appendable = [p for p in promoted if p.get("type") != "soul-suggestion"]
         if appendable:
             new_memory = _append_promotions(memory_text, appendable)
-            new_memory = _compact_if_over_cap(new_memory)
+            new_memory, mem_over_cap = _compact_if_over_cap(new_memory)
+            if mem_over_cap:
+                fails.append("daily_memory_over_cap")
             with file_lock(memory_path):
                 atomic_write(memory_path, new_memory)
             _log(
@@ -977,7 +1049,40 @@ def _run_daily_stage(dry_run: bool) -> int:
 
     _record_done(yesterday_str)
     _log(f"daily-log stage done; recorded last={yesterday_str}")
-    return 0
+    return 0, fails
+
+
+def _emit_verdict(
+    rc: int,
+    daily_fails: list[str],
+    inbox_failures: list[tuple[str, str]],
+) -> None:
+    """Record a single success/failure verdict covering BOTH stages.
+
+    The dead-man's-switch goes green only when both stages were clean. One
+    project's soft failure is reported (with the affected slugs in `paths`)
+    without masking the others — they still processed.
+    """
+    state = REFLECT_REPORTER.load()
+    attempt_ts = _ts_brt()
+    all_kinds = list(daily_fails) + [k for _, k in inbox_failures]
+    if not rc and not all_kinds:
+        REFLECT_REPORTER.record_success(state, attempt_ts)
+        return
+    paths = sorted({slug for slug, _ in inbox_failures})
+    kind = ",".join(sorted(set(all_kinds))) or "hard_error"
+    parts = []
+    if rc:
+        parts.append(f"rc={rc}")
+    if daily_fails:
+        parts.append(f"daily: {', '.join(daily_fails)}")
+    if inbox_failures:
+        parts.append(
+            "inbox: " + ", ".join(f"{s}[{k}]" for s, k in inbox_failures)
+        )
+    REFLECT_REPORTER.record_failure(
+        state, attempt_ts, kind=kind, msg="; ".join(parts), paths=paths
+    )
 
 
 def _run(
@@ -993,19 +1098,30 @@ def _run(
     separate state files (last_reflection.json vs inbox_reflection.json), so the
     inbox stage runs even when the daily stage short-circuits (no log / already
     reflected). An inbox-stage crash never aborts an already-completed daily stage.
+
+    A monitoring verdict is emitted ONLY on the full scheduled run (both stages,
+    no --project filter, not --dry-run) — partial/manual runs don't touch the
+    dead-man's-switch.
     """
     rc = 0
+    daily_fails: list[str] = []
+    inbox_failures: list[tuple[str, str]] = []
     if do_daily:
-        rc = _run_daily_stage(dry_run)
+        rc, daily_fails = _run_daily_stage(dry_run)
     if do_inbox:
         _log(f"reflection (inbox stage) start ({_ts_brt()})")
         try:
-            _run_inbox_stage(dry_run, only_project=only_project)
+            inbox_failures = _run_inbox_stage(dry_run, only_project=only_project)
         except Exception as e:
             _log(f"  inbox stage failed: {type(e).__name__}: {e}")
             rc = rc or 1
+            inbox_failures.append(("(inbox-stage)", f"crashed:{type(e).__name__}"))
         else:
             _log("inbox stage done")
+
+    is_full_run = do_daily and do_inbox and only_project is None and not dry_run
+    if is_full_run:
+        _emit_verdict(rc, daily_fails, inbox_failures)
     return rc
 
 
@@ -1018,12 +1134,23 @@ def main(argv: list[str]) -> int:
     args = parser.parse_args(argv[1:])
     if args.inbox_only and args.skip_inbox:
         parser.error("--inbox-only and --skip-inbox are mutually exclusive")
-    return _run(
-        dry_run=args.dry_run,
-        do_daily=not args.inbox_only,
-        do_inbox=not args.skip_inbox,
-        only_project=args.project,
-    )
+
+    # Run-lock guards the in-place mutation path (inbox strip/clear + MEMORY.md
+    # writes); a manual run during the 08:00 timer skips rather than racing.
+    # Dry-runs mutate nothing, so they never lock.
+    if not args.dry_run and not REFLECT_REPORTER.try_lock():
+        REFLECT_REPORTER.log("another reflection run is in progress — skipping this tick")
+        return 0
+    try:
+        return _run(
+            dry_run=args.dry_run,
+            do_daily=not args.inbox_only,
+            do_inbox=not args.skip_inbox,
+            only_project=args.project,
+        )
+    finally:
+        if not args.dry_run:
+            REFLECT_REPORTER.unlock()
 
 
 if __name__ == "__main__":
