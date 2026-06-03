@@ -120,6 +120,12 @@ uv run python .claude/skills/weekly-review/scripts/aggregate_week.py [--week YYY
 uv run python .claude/scripts/heartbeat.py [--dry-run] [--no-agent] [--force]
 uv run python .claude/scripts/memory_reflect.py [--dry-run] [--inbox-only] [--skip-inbox] [--project <slug>]
 
+# Knowledge-gap scan (BaaS C1 — stale ongoing-entity detector):
+uv run python .claude/scripts/gap_analysis.py            # human table
+uv run python .claude/scripts/gap_analysis.py --json     # machine-readable
+uv run python .claude/scripts/gap_analysis.py --days 21  # uniform threshold override
+uv run python .claude/scripts/gap_analysis.py --folders projects,goals
+
 # Privacy gate canary test (CI gate — must pass before any BaaS pilot):
 uv run python tests/test_privacy_gate.py
 
@@ -176,7 +182,7 @@ Two manually-runnable proactive scripts. Phase 9 wires launchd / systemd schedul
 1. Re-index vault (subprocess `memory_index.py`).
 2. Gather Slack/GitHub/ClickUp/Gmail/Calendar/RSS in parallel via `asyncio.gather` (each integration call wrapped in `asyncio.to_thread`; `return_exceptions=True` so one failure doesn't abort the tick).
 3. Build snapshot (`heartbeat_snapshot.build_snapshot`); diff against previous (`heartbeat_snapshot.diff_snapshot`); persist current snapshot to `.claude/data/state/heartbeat-state.json` BEFORE the agent runs (a crash-during-agent doesn't replay the same delta on next tick).
-4. Drafts hygiene (`drafts.expire_old_drafts` — moves >24h-old drafts to `drafts/expired/`; `drafts.capture_sent_replies` is a Phase 6.5 stub) + habits prep (`habits.reset_for_today_if_needed` archives yesterday's "## Today" to "## History" and rebuilds a fresh checklist; `habits.detect_signals` computes per-pillar booleans from the snapshot diff).
+4. Drafts hygiene (`drafts.expire_old_drafts` — moves >24h-old drafts to `drafts/expired/`; `drafts.capture_sent_replies` is a Phase 6.5 stub) + habits prep (`habits.reset_for_today_if_needed` archives yesterday's "## Today" to "## History" and rebuilds a fresh checklist; `habits.detect_signals` computes per-pillar booleans from the snapshot diff) + **knowledge-gap scan** (`gap_analysis.gaps_to_surface` — see below).
 5. If delta is empty AND no habits-reset AND no drafts expired → fast-path: append a one-line tick to today's daily log + `_notify` "no changes" + exit. Otherwise: build sanitized `delta_text` (every external payload through `sanitize.wrap_external`) → Haiku 4.5 guardrail (`allowed_tools=[]`, `setting_sources=None`, `max_turns=1`, default-deny on parse failure) → on `pass`/`suspicious`, Sonnet 4.6 main agent (`allowed_tools=["Read","Write","Edit","Bash"]`, `setting_sources=["project"]`, `max_turns=15`) → osascript notify.
 
 The main agent's tools include Bash but the system prompt forbids invoking `query.py slack send` or any external curl. Phase 8's `dangerous-bash.py` hardens this; Phase 6 ships honor-system + tools-whitelist.
@@ -209,6 +215,12 @@ Idempotent via a **per-project watermark** in `.claude/data/state/inbox_reflecti
 `drafts.py` handles deterministic lifecycle: `expire_old_drafts(now)` moves >24h-old drafts from `drafts/active/` to `drafts/expired/` (flips `status: expired`). `capture_sent_replies` is a Phase 6.5 stub. Voice corpus retrieval uses `memory_search.py --path-prefix drafts/sent`. Filename: `YYYY-MM-DD_<source>_<recipient-slug>_<short-hash>.md` — same `(source, source_id)` always hashes to the same filename so the same item never produces two drafts.
 
 `habits.py` handles the 08:00 BRT reset (deterministic — archive yesterday's "Today" to History, create fresh checklist) + signal detection (per-pillar boolean from snapshot deltas). The HEARTBEAT AGENT applies HABITS.md check-marks via the Edit tool — `habits.py` only computes signals.
+
+### Knowledge-gap scan (`gap_analysis.py`, BaaS C1)
+
+Deterministic, zero-LLM "nothing filed about X in N+ days" detector — gbrain's most distinctive UX, our demo trust-builder. A filesystem-**mtime** recency scan over an ongoing-entity folder allowlist (`projects`, `clients`, `goals`; env `BRUNOS_GAP_FOLDERS`), with **per-folder thresholds** (`projects`/`clients`/`goals` = 14/21/10 days; `BRUNOS_GAP_STALE_DAYS`/`--days` override). mtime (not the frontmatter `updated:` field) is the signal: it also catches Obsidian hand-edits and is the conservative "has *anything* happened to this entity" measure. Skips: closed entities (`status: archived|done|completed|cancelled`), `_`-prefixed meta files, dated point-in-time artifacts (`YYYY-Www-review.md`, date-stamped snapshots — a past week's review is *meant* to be stale), and `personal/finance.md`.
+
+Two surfaces: a **standalone CLI** (`--json`/`--days`/`--folders`, pure — no writes) for demos/on-demand, and the **heartbeat** (`gaps_to_surface` in stage 4b) which surfaces **at most once/day** (guard in `gap-analysis-state.json`, `last_surfaced_date`) — appends a `## Knowledge gaps` block to the daily log + folds a one-liner into the tick notification, so it can't spam the 30-min ticks. No SyncReporter: it runs inside the already-monitored heartbeat. Scope note: re-fires only on a *new day*, not when the gap set changes intra-day (acceptable v1). Standalone tests: `tests/test_gap_analysis.py`.
 
 ## Slack chat bot (Phase 7)
 
