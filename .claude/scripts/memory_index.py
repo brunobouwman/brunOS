@@ -8,6 +8,7 @@ personal/finance.md per the SOUL.md no-financial-data boundary.
 from __future__ import annotations
 
 import argparse
+import re
 import sys
 from pathlib import Path
 
@@ -19,7 +20,9 @@ from db import (
     all_file_mtimes,
     connect,
     delete_chunks_for_file,
+    delete_edges_for_file,
     init_schema,
+    replace_edges,
     upsert_chunk,
 )
 from embeddings import embed_passages
@@ -31,6 +34,10 @@ OVERLAP_TOKENS = 50
 STEP = CHUNK_TOKENS - OVERLAP_TOKENS
 
 EXCLUDE_RELATIVE = {"personal/finance.md"}
+
+# Wikilink graph (C1): zero-LLM regex edge extraction. `[[target]]`,
+# `[[target|alias]]`, `[[target#heading]]` → target. gbrain's method.
+_WIKILINK_RE = re.compile(r"\[\[([^\]]+)\]\]")
 
 _tok: Tokenizer | None = None
 
@@ -60,6 +67,48 @@ def chunk_text(text: str) -> list[str]:
             break
         i += STEP
     return chunks
+
+
+def extract_links(text: str) -> list[str]:
+    """Pull wikilink targets from raw markdown. `[[a|alias]]` / `[[a#h]]` → `a`.
+    Deduped, order-preserving. Pure (testable)."""
+    out: list[str] = []
+    seen: set[str] = set()
+    for m in _WIKILINK_RE.findall(text):
+        target = m.split("|", 1)[0].split("#", 1)[0].strip()
+        if target and target not in seen:
+            seen.add(target)
+            out.append(target)
+    return out
+
+
+def build_basename_map(rel_paths) -> dict[str, list[str]]:
+    """basename (lowercased, no `.md`) → candidate rel-paths, each sorted by
+    (path depth, lexicographic) so [0] is the canonical pick — mirrors Obsidian's
+    "shortest path wins" rule for ambiguous basenames (e.g. `[[vertik]]`)."""
+    out: dict[str, list[str]] = {}
+    for rel in rel_paths:
+        stem = Path(rel).stem.lower()
+        out.setdefault(stem, []).append(rel)
+    for stem, paths in out.items():
+        paths.sort(key=lambda p: (p.count("/"), p))
+    return out
+
+
+def resolve_link(
+    slug: str, basename_map: dict[str, list[str]], by_path: set[str]
+) -> str | None:
+    """Resolve a wikilink target to a vault-relative file_path, or None (dangling).
+
+    A slug containing `/` is treated as an explicit path (with/without `.md`);
+    otherwise it's resolved by basename. Returns None when nothing matches.
+    """
+    s = slug.strip().lstrip("/")
+    if "/" in s:
+        cand = s if s.endswith(".md") else s + ".md"
+        return cand if cand in by_path else None
+    hits = basename_map.get(s.lower())
+    return hits[0] if hits else None
 
 
 def index(
@@ -92,10 +141,28 @@ def index(
 
     print(f"to_index: {len(to_index)} / {len(md_files)} files", file=sys.stderr)
 
+    # Resolution map for wikilink edges — built from the FULL vault (not just the
+    # incremental to_index set) so a changed file can still resolve links to
+    # unchanged files. Cheap (one glob).
+    all_rel = {
+        p.relative_to(vault).as_posix() for p in vault.glob("**/*.md")
+    } - EXCLUDE_RELATIVE
+    basename_map = build_basename_map(all_rel)
+
     if not dry_run:
         for f in to_index:
             rel = f.relative_to(vault).as_posix()
             text = f.read_text(encoding="utf-8")
+            # Refresh this file's outgoing edges regardless of chunk count.
+            dsts = [
+                d
+                for d in (
+                    resolve_link(s, basename_map, all_rel)
+                    for s in extract_links(text)
+                )
+                if d
+            ]
+            replace_edges(conn, rel, dsts)
             chunks = chunk_text(text)
             if not chunks:
                 delete_chunks_for_file(conn, rel)
@@ -107,12 +174,13 @@ def index(
             for i, (c, e) in enumerate(zip(chunks, embeddings)):
                 upsert_chunk(conn, rel, i, c, cur_mtime, e)
             conn.commit()
-            print(f"  indexed {rel} ({len(chunks)} chunks)", file=sys.stderr)
+            print(f"  indexed {rel} ({len(chunks)} chunks, {len(dsts)} links)", file=sys.stderr)
 
         if not paths:
             stale = set(indexed_mtimes.keys()) - on_disk
             for rel in stale:
                 delete_chunks_for_file(conn, rel)
+                delete_edges_for_file(conn, rel)
                 print(f"  deleted {rel}", file=sys.stderr)
             conn.commit()
 
