@@ -54,6 +54,7 @@ from heartbeat_snapshot import (  # noqa: E402
 from sanitize import TRUST_BOUNDARY_INSTRUCTION, wrap_external  # noqa: E402
 
 import drafts  # noqa: E402
+import gap_analysis  # noqa: E402
 import habits  # noqa: E402
 from integrations import calendar as gcal  # noqa: E402
 from integrations import clickup, github, gmail, rss, slack  # noqa: E402
@@ -744,6 +745,23 @@ def _run(dry_run: bool, no_agent: bool, force: bool) -> int:
 
     active_drafts_summary = drafts.format_active_drafts_summary()
 
+    # Stage 4b: knowledge-gap scan (deterministic, zero-LLM). Surfaces at most
+    # once/day so it can't spam the 30-min ticks; appends a block to the daily
+    # log + folds a one-liner into the tick notification below.
+    gap_summary = ""
+    if not dry_run:
+        try:
+            gaps = gap_analysis.gaps_to_surface(now_brt())
+            if gaps:
+                append_to_daily_log(gap_analysis.format_block(gaps, now_brt()))
+                gap_analysis.mark_surfaced(now_brt(), gaps)
+                gap_summary = gap_analysis.format_summary(gaps)
+                _log(f"  knowledge gaps surfaced: {gap_summary}")
+            else:
+                _log("  knowledge gaps: none new today")
+        except Exception as e:
+            _log(f"  gap analysis failed: {type(e).__name__}: {e}")
+
     # Stage 5a: --no-agent takes precedence (debug flag — predictable logs)
     if no_agent:
         _log("stage 5: --no-agent; deterministic stages done; skipping SDK calls")
@@ -771,8 +789,11 @@ def _run(dry_run: bool, no_agent: bool, force: bool) -> int:
             except Exception as e:
                 _log(f"  daily log append failed: {type(e).__name__}: {e}")
             _persist_last_run(delta, signals, "fast-path")
-            _record_tick("fast-path", delta=delta)
-            _notify("BrunOS heartbeat", sync_warn or "No changes")
+            msg = sync_warn or "No changes"
+            if gap_summary:
+                msg = f"{msg} | gaps: {gap_summary}"
+            _notify("BrunOS heartbeat", msg[:120])
+            _record_tick("fast-path", gap_summary, delta=delta)
         return 0
 
     # Stage 6: build delta text + sanitize
@@ -852,7 +873,10 @@ def _run(dry_run: bool, no_agent: bool, force: bool) -> int:
     _persist_last_run(delta, signals, "ok")
     _record_tick("ok", delta=delta)
     sync_warn = _vault_sync_warning()
-    _notify("BrunOS heartbeat", f"{sync_warn} | {summary}"[:120] if sync_warn else summary)
+    base = f"{sync_warn} | {summary}" if sync_warn else summary
+    if gap_summary:
+        base = f"{base} | gaps: {gap_summary}"
+    _notify("BrunOS heartbeat", base[:120])
     return 0
 
 
