@@ -29,7 +29,7 @@ The vault lives at `$BRUNOS_VAULT_PATH` (resolve via `shared.vault_path()` — n
 
 - `SOUL.md` — agent identity. **Write-protected from reflection.** Proposed changes go into the daily log under "SUGGESTED SOUL CHANGES (REVIEW MANUALLY)".
 - `USER.md` — Bruno's profile, stack, drafting criteria, voice rules.
-- `MEMORY.md` — durable decisions / active state. **Hard cap 5KB.** Growth via reflection only — Bruno doesn't hand-edit.
+- `MEMORY.md` — durable decisions / active state. **Hard cap 8KB.** Growth via reflection only — Bruno doesn't hand-edit.
 - `HEARTBEAT.md` — what the heartbeat monitors each tick.
 - `HABITS.md` — 5 daily pillars, auto-detection rules, daily reset 08:00 BRT.
 - `sources_of_truth.md` — ClickUp ↔ Obsidian convention reference.

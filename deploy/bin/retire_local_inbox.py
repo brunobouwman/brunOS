@@ -47,6 +47,7 @@ from shared import (  # noqa: E402
     parse_iso,
     vault_path,
 )
+from sync_common import make_reporter, report_outcome  # noqa: E402
 
 load_env()
 
@@ -122,10 +123,19 @@ def main(argv: list[str]) -> int:
     ap.add_argument("--vault", default=None)
     args = ap.parse_args(argv)
 
+    # Track D Phase 1: report scheduled runs (status file + Slack + healthchecks.io).
+    # DELIBERATELY reports in dry-run mode too — the launchd unit runs dry-run
+    # during its review period, and the dead-man switch must prove the job runs
+    # either way. --vps-state-file (offline/test mode) stays silent.
+    reporter = None if args.vps_state_file else make_reporter(
+        "inbox-retire", "BRUNOS_INBOX_RETIRE_HEALTHCHECK_URL"
+    )
+
     vault = Path(args.vault).expanduser() if args.vault else vault_path()
     sessions = vault / "Memory" / "_inbox" / "sessions"
     if not sessions.is_dir():
         _log(f"no inbox sessions dir at {sessions}; nothing to do")
+        report_outcome(reporter, ok=True, extra={"note": "no inbox sessions dir"})
         return 0
 
     statuses = [s.strip() for s in args.terminal_status.split(",") if s.strip()]
@@ -140,9 +150,13 @@ def main(argv: list[str]) -> int:
     # Fail-safe: never delete on an unavailable or empty terminal set.
     if terminal is None:
         _log("ABORT: could not read VPS terminal set — nothing retired (fail-safe).")
+        report_outcome(reporter, ok=False, kind="terminal-set",
+                       msg="could not read VPS terminal set (ssh failure?) — fail-safe abort")
         return 2
     if not terminal:
         _log("ABORT: VPS terminal set is empty — refusing to delete (fail-safe).")
+        report_outcome(reporter, ok=False, kind="terminal-set",
+                       msg="VPS terminal set is empty — fail-safe abort")
         return 2
     _log(f"VPS reports {len(terminal)} terminal capture(s).")
 
@@ -178,6 +192,10 @@ def main(argv: list[str]) -> int:
 
     if not args.apply:
         _log("\n(dry-run — re-run with --apply to delete)")
+        report_outcome(reporter, ok=True, extra={
+            "mode": "dry-run", "retire_candidates": len(retire),
+            "not_terminal": not_terminal, "too_young": too_young,
+        })
         return 0
 
     deleted = 0
@@ -196,6 +214,10 @@ def main(argv: list[str]) -> int:
             except OSError:
                 pass
     _log(f"\nretired {deleted} capture(s).")
+    report_outcome(reporter, ok=True, extra={
+        "mode": "apply", "retired": deleted, "retire_candidates": len(retire),
+        "not_terminal": not_terminal, "too_young": too_young,
+    })
     return 0
 
 

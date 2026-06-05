@@ -1,0 +1,20 @@
+{"query": "where do we stand on the BaaS security and privacy model", "gold": ["projects/Brain/baas_security_privacy.md"]}
+{"query": "BaaS go-to-market pitch and pricing tiers", "gold": ["projects/Brain/baas_gtm_pricing.md"]}
+{"query": "brain-as-a-service product vision and differentiation versus gbrain", "gold": ["projects/Brain/brain_as_a_service.md"]}
+{"query": "the three buckets of BaaS product scope", "gold": ["projects/Brain/baas_product_scope.md"]}
+{"query": "graph traversal and retrieval quality improvements for the brain", "gold": ["projects/Brain/baas_product_scope.md"]}
+{"query": "autonomous dev skill pipeline design", "gold": ["projects/Brain/autonomous_dev_skill.md"]}
+{"query": "access policy tiers full exec dept none", "gold": ["projects/Brain/ACCESS_POLICY.md"]}
+{"query": "monitoring and observability requirements for the brain", "gold": ["projects/Brain/monitoring-observability-prd.md"]}
+{"query": "BrunOS build follow-ups and deferred backlog", "gold": ["projects/Brain/brunos_followups.md"]}
+{"query": "Vertik clean architecture adapter and driver boundary", "gold": ["projects/vertik/vertik_clean_architecture.md"]}
+{"query": "Vertik modular add-ons strategy and pricing tiers", "gold": ["projects/vertik/vertik_modular_addons_strategy.md"]}
+{"query": "Studio visual flow editor and the Vertik brain vision", "gold": ["projects/vertik/vertik_ideas.md"]}
+{"query": "orcamento audit comparator grounding and debugging", "gold": ["projects/vertik/orcamento_grounding_debug.md", "projects/vertik/orcamento_status_doc_task_prompt.md"]}
+{"query": "Vertik production debugging notes", "gold": ["projects/vertik/vertik_prod_debug.md"]}
+{"query": "Colinas cemetery sales agent project", "gold": ["projects/Protostack/colinas.md"]}
+{"query": "Protostack agency overview and freelancing", "gold": ["projects/Protostack/protostack.md"]}
+{"query": "Lisa working relationship and profile", "gold": ["team/lisa.md"]}
+{"query": "the five daily habit pillars", "gold": ["HABITS.md"]}
+{"query": "Bruno's tech stack and career arc", "gold": ["USER.md"]}
+{"query": "botmaster onboarding kit for the company brain", "gold": ["projects/Brain/botmaster-onboarding-kit.md"]}

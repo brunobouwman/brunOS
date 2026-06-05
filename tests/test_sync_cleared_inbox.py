@@ -12,10 +12,14 @@ un-cleared capture is held back.
 from __future__ import annotations
 
 import importlib.util
+import os
 import shutil
 import sys
 import tempfile
 from pathlib import Path
+
+# Track D: tests must never write real monitor state / ping healthchecks.
+os.environ["BRUNOS_DISABLE_REPORTING"] = "1"
 
 REPO = Path(__file__).resolve().parents[1]
 
