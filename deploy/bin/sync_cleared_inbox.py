@@ -56,7 +56,8 @@ from pathlib import Path
 REPO = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(REPO / ".claude" / "scripts"))
 
-from shared import _FM_RE, CONSUMER_READ_SCOPES, validate_consumer_read  # noqa: E402
+from shared import _FM_RE, CONSUMER_READ_SCOPES, load_env, validate_consumer_read  # noqa: E402
+from sync_common import make_reporter, report_outcome  # noqa: E402
 
 DEFAULT_SRC = "/home/bruno/BrunOS/Memory/_inbox/sessions"
 
@@ -140,12 +141,23 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--dry-run", action="store_true")
     args = ap.parse_args(argv)
 
+    # Track D Phase 1: real runs report (status file + Slack + healthchecks.io);
+    # dry-runs stay silent. BRUNOS_DISABLE_REPORTING=1 disables (tests).
+    load_env()
+    reporter = None if args.dry_run else make_reporter(
+        "linos-inbox-sync", "BRUNOS_LINOS_INBOX_SYNC_HEALTHCHECK_URL"
+    )
+
     if args.consumer not in CONSUMER_READ_SCOPES:
         print(f"==> unknown consumer {args.consumer!r} "
               f"(known: {sorted(CONSUMER_READ_SCOPES)})", file=sys.stderr)
+        report_outcome(reporter, ok=False, kind="config",
+                       msg=f"unknown consumer {args.consumer!r}")
         return 2
     if not args.dst:
         print("==> no dest: set LINOS_INBOX_DEST or pass --dst", file=sys.stderr)
+        report_outcome(reporter, ok=False, kind="config",
+                       msg="no dest: set LINOS_INBOX_DEST or pass --dst")
         return 2
 
     src = Path(args.src)
@@ -161,6 +173,7 @@ def main(argv: list[str] | None = None) -> int:
         return 0
     if not rels:
         print("==> nothing eligible — nothing to sync")
+        report_outcome(reporter, ok=True, extra={"select_stats": stats, "synced": 0})
         return 0
 
     # mkdir dest (local path only; a remote host:path dest is the operator's job)
@@ -177,8 +190,12 @@ def main(argv: list[str] | None = None) -> int:
 
     if rc == 0:
         print(f"==> synced {len(rels)} cleared+in-scope captures → {args.dst}")
+        report_outcome(reporter, ok=True,
+                       extra={"select_stats": stats, "synced": len(rels)})
     else:
         print(f"==> rsync exited {rc}", file=sys.stderr)
+        report_outcome(reporter, ok=False, kind="rsync",
+                       msg=f"rsync exited {rc} → {args.dst}")
     return rc
 
 

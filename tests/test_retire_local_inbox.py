@@ -9,10 +9,16 @@ The VPS terminal set is injected via --vps-state-file (no SSH).
 
 from __future__ import annotations
 
+import os
 import subprocess
 import sys
 import tempfile
 from pathlib import Path
+
+# Track D: tests must never write real monitor state / ping healthchecks.
+# (Inherited by the subprocess runs below; --vps-state-file mode is also
+# reporting-silent by design.)
+os.environ["BRUNOS_DISABLE_REPORTING"] = "1"
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 SCRIPT = REPO_ROOT / "deploy" / "bin" / "retire_local_inbox.py"

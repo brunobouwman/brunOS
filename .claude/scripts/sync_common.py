@@ -8,6 +8,7 @@ run-lock implementation, parametrized per service, so the two syncs can't drift.
 from __future__ import annotations
 
 import fcntl
+import json
 import os
 import socket
 import subprocess
@@ -24,6 +25,9 @@ from shared import _ts_brt, load_state, now_brt, save_state  # noqa: E402
 NET_TIMEOUT = 90
 ALERT_REPEAT_SECONDS = 3600
 SCHEMA_VERSION = 1
+# healthchecks.io stores the last ping's request body (~100KB cap) and exposes it
+# via API — Track D's fleet-richness channel. Stay safely under the cap.
+PING_BODY_MAX_BYTES = 90_000
 
 
 class GitError(Exception):
@@ -104,13 +108,30 @@ class SyncReporter:
             self.log(f"ALERT: Slack send failed: {type(e).__name__}: {e}")
             return False
 
-    def healthcheck(self, success: bool) -> None:
+    def healthcheck(self, success: bool, body: dict | None = None) -> None:
+        """Dead-man ping. When `body` is given (the status-file state), it is POSTed
+        as the ping body — healthchecks.io stores the last body, so the fleet view
+        can read rich per-service state (last error, counts, watermarks) from the
+        same API that serves alive/dead. Never raises; never fails the run."""
         url = os.environ.get(self.healthcheck_env, "").strip()
         if not url:
             return
         target = url if success else url.rstrip("/") + "/fail"
+        data: bytes | None = None
+        if body is not None:
+            try:
+                data = json.dumps(body, ensure_ascii=False, default=str).encode("utf-8")
+                if len(data) > PING_BODY_MAX_BYTES:
+                    data = data[:PING_BODY_MAX_BYTES]
+            except Exception:  # noqa: BLE001 — body is best-effort, ping still goes out
+                data = None
         try:
-            urllib.request.urlopen(target, timeout=10)  # noqa: S310
+            req = urllib.request.Request(
+                target,
+                data=data,
+                headers={"Content-Type": "application/json"} if data else {},
+            )
+            urllib.request.urlopen(req, timeout=10)  # noqa: S310
         except Exception as e:  # noqa: BLE001
             self.log(f"healthcheck ping ({'ok' if success else 'fail'}) failed: {type(e).__name__}")
 
@@ -132,7 +153,7 @@ class SyncReporter:
         if extra:
             state.update(extra)
         save_state(self.status_file, state)
-        self.healthcheck(success=True)
+        self.healthcheck(success=True, body=state)
 
     def record_failure(
         self, state: dict, attempt_ts: str, kind: str, msg: str, paths: list[str] | None = None
@@ -163,7 +184,7 @@ class SyncReporter:
             ):
                 state["last_alert_ts"] = _ts_brt()
         save_state(self.status_file, state)
-        self.healthcheck(success=False)
+        self.healthcheck(success=False, body=state)
 
     def try_lock(self) -> bool:
         self.lock_file.parent.mkdir(parents=True, exist_ok=True)
@@ -184,3 +205,47 @@ class SyncReporter:
         finally:
             os.close(self._lock_fd)
             self._lock_fd = None
+
+
+# --- Track D Phase 1 convenience layer -------------------------------------
+# One-call reporting for oneshot scripts (transports, doctors, watchdogs).
+# Naming convention: status file <service>-state.json, lock <service>.run.lock.
+
+
+def make_reporter(service: str, healthcheck_env: str) -> SyncReporter | None:
+    """Build the standard reporter for `service`, or None when reporting is
+    disabled via BRUNOS_DISABLE_REPORTING=1 (tests / ad-hoc runs)."""
+    if os.environ.get("BRUNOS_DISABLE_REPORTING", "").strip():
+        return None
+    from shared import STATE_DIR
+
+    return SyncReporter(
+        service=service,
+        status_file=STATE_DIR / f"{service}-state.json",
+        lock_file=STATE_DIR / "locks" / f"{service}.run.lock",
+        healthcheck_env=healthcheck_env,
+    )
+
+
+def report_outcome(
+    reporter: SyncReporter | None,
+    *,
+    ok: bool,
+    kind: str = "",
+    msg: str = "",
+    extra: dict | None = None,
+) -> None:
+    """Record one run outcome. No-op on a None reporter; never raises —
+    observability plumbing must not break the job it observes."""
+    if reporter is None:
+        return
+    try:
+        state = reporter.load()
+        if extra:
+            state.update(extra)
+        if ok:
+            reporter.record_success(state, _ts_brt(), extra=extra)
+        else:
+            reporter.record_failure(state, _ts_brt(), kind=kind, msg=msg)
+    except Exception as e:  # noqa: BLE001
+        reporter.log(f"report_outcome failed (non-fatal): {type(e).__name__}: {e}")
