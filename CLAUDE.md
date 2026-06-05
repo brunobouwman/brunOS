@@ -18,7 +18,7 @@ Phase 4 moved the env file from repo-root `.env` to `.claude/.env`. `shared.load
 
 - `Memory/SOUL.md` — agent identity (write-protected from reflection per Phase 6).
 - `Memory/USER.md` — Bruno's profile.
-- `Memory/MEMORY.md` — durable memory, ≤5KB hard cap, growth via reflection only.
+- `Memory/MEMORY.md` — durable memory, ≤8KB hard cap, growth via reflection only.
 - `Memory/HEARTBEAT.md` — what to monitor each tick.
 - `Memory/HABITS.md` — 5 daily pillars.
 - `Memory/sources_of_truth.md` — ClickUp ↔ Obsidian convention reference.
@@ -210,10 +210,10 @@ CLI flags: `--dry-run` (print stages + would-be agent prompt; skip SDK calls + v
 
 `memory_reflect.py` runs **two independent, idempotent stages** orchestrated by `_run()`; each has its own state file, so the inbox stage runs even when the daily-log stage short-circuits.
 
-**Daily-log stage** (`_run_daily_stage`): single Sonnet 4.6 call (`allowed_tools=[]`, `setting_sources=None`, `max_turns=1`). Reads yesterday's daily log + current MEMORY.md; emits JSON of `[{type, text, promote}]` per item; deterministic Python applies promotions to the right MEMORY.md section (decision → "Key durable decisions", lesson → "Lessons", fact → "Tax & financial structure", status → "Active projects"). If MEMORY.md > 5KB after append, a SECOND Sonnet call compacts older entries first (aborts apply if shrink > 50%). SOUL.md changes go to today's daily log under "## SUGGESTED SOUL CHANGES (REVIEW MANUALLY)" — never directly written. Idempotent via `.claude/data/state/last_reflection.json`.
+**Daily-log stage** (`_run_daily_stage`): single Sonnet 4.6 call (`allowed_tools=[]`, `setting_sources=None`, `max_turns=1`). Reads yesterday's daily log + current MEMORY.md; emits JSON of `[{type, text, promote}]` per item; deterministic Python applies promotions to the right MEMORY.md section (decision → "Key durable decisions", lesson → "Lessons", fact → "Tax & financial structure", status → "Active projects"). If MEMORY.md > 8KB after append, a SECOND Sonnet call compacts older entries first (floor-guarded against truncated/garbage returns). SOUL.md changes go to today's daily log under "## SUGGESTED SOUL CHANGES (REVIEW MANUALLY)" — never directly written. Idempotent via `.claude/data/state/last_reflection.json`.
 
 **Inbox stage / federation write-side** (`_run_inbox_stage`): drains the per-project session inboxes at `Memory/_inbox/sessions/<slug>/` (populated by the Phase A external-repo capture hooks). **One Sonnet call per project** with new captures (bounded by *projects touched*, not total projects), producing **three outputs per project**:
-1. **Personal consolidation** → durable personal items appended to MEMORY.md (same `_append_promotions` path + 5KB cap-guard as the daily stage).
+1. **Personal consolidation** → durable personal items appended to MEMORY.md (same `_append_promotions` path + 8KB cap-guard as the daily stage).
 2. **Per-project continuity** → distilled bullets inserted under a machine-managed `## Auto-consolidated continuity` section in `projects/<slug>.md` (created with full frontmatter if absent; hand-written header preserved; capped to 8KB via the generalized `_compact_if_over_cap`). The `session-start-project.py` hook already loads `projects/<slug>.md` via `--context-file`, so this enriches the next session in that repo.
 3. **Strip-in-place + `share_status: cleared`** → each capture is rewritten with personal-life asides removed and stamped `share_status: cleared` in frontmatter (work/technical content preserved verbatim). This is the **privacy boundary as a flag** — a downstream company brain (LinOS now, VertikOS later) reading the same gitignored, per-company inbox sees only work-scoped, cleared content. Captures are **never deleted or moved by reflection**; the Mac producer retires its local copies separately once the VPS holds them terminal (see below). External capture bodies enter the prompt via `sanitize.wrap_external`.
 

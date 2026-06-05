@@ -1,7 +1,7 @@
 """Daily reflection: distil yesterday's daily log into MEMORY.md.
 
 Single Sonnet 4.6 call (no tools, no skills) → JSON [{type, text, promote}] →
-deterministic Python applies promotions. If MEMORY.md > 5KB after append, a
+deterministic Python applies promotions. If MEMORY.md > 8KB after append, a
 SECOND Sonnet call compacts older entries before re-writing.
 
 CLAUDE_INVOKED_BY=reflection — the protect-soul.py PreToolUse hook keys off
@@ -59,7 +59,12 @@ load_env()
 LAST_REFLECTION_PATH = STATE_DIR / "last_reflection.json"
 DEBUG_DIR = STATE_DIR
 MEMORY_REL = "Memory/MEMORY.md"
-MEMORY_HARD_CAP_BYTES = 5120
+# 5120 until 2026-06-05: the cap bound on nearly every run once daily lessons
+# accelerated, so each run burned a compaction call and risked lossy squeezes of
+# durable items (first armed monitoring run alerted memory_over_cap twice).
+# Raised to match PROJECT_DOC_CAP_BYTES. Structural fix (compact once per run +
+# evict-to-archive instead of delete) is deferred to the dream PR.
+MEMORY_HARD_CAP_BYTES = 8192
 # Compaction sanity floor: abort apply only if the compacted body is below this
 # fraction of the CAP (not of the original) — catches a nuked/garbage LLM return
 # while still allowing the large shrink needed to rescue a doc that bloated well
