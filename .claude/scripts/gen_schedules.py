@@ -80,6 +80,16 @@ UNITS = [
         "hours_path": None,
         "timeout": 1800,
     },
+    {
+        "key": "comms-capture",
+        "label": "comms capture (high-signal knowledge from comms channels)",
+        "script": ".claude/scripts/comms_capture.py",
+        "args": [],
+        "enabled_path": "comms_capture.enabled",
+        "cadence_path": "comms_capture.cadence",
+        "hours_path": "comms_capture.hours",
+        "timeout": 1800,
+    },
 ]
 
 

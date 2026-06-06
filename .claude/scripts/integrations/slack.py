@@ -216,6 +216,77 @@ def since_last_run(client) -> list[Message]:
     return aggregated
 
 
+def fetch_channel_history(
+    client,
+    channel_id: str,
+    *,
+    oldest: str | None = None,
+    limit: int = 200,
+    max_messages: int = 2000,
+) -> tuple[list[Message], str | None]:
+    """Stateless read of one channel's messages newer than `oldest` (a Slack ts).
+
+    Unlike `since_last_run`, this NEVER advances the per-channel watermarks in
+    slack-state.json — the caller owns its own cursor. This is what lets a second
+    reader (the comms-capture feeder) poll the same channels without racing the
+    heartbeat's shared read (each would otherwise consume the other's messages).
+    (It may still lazily cache `bot_user_id` into state on first call — that field
+    is shared and harmless; the channel cursors are untouched.)
+
+    Returns (kept_messages_ascending, newest_ts_seen). `newest_ts_seen` reflects
+    EVERY message scanned — including bot/subtype noise filtered out of the list —
+    so a caller can advance its cursor past a noise-only window and never re-scan
+    it. Bot's own messages + subtype noise are dropped from the returned list
+    (same rule as `since_last_run`).
+    """
+    bot_uid = _bot_user_id(client, _load())
+    oldest_str = str(oldest) if oldest else "0"
+    try:
+        max_seen = float(oldest_str)
+    except ValueError:
+        max_seen = 0.0
+    kept: list[Message] = []
+    cursor: str | None = None
+    while True:
+        kwargs = {"channel": channel_id, "oldest": oldest_str, "limit": limit, "inclusive": False}
+        if cursor:
+            kwargs["cursor"] = cursor
+        resp = with_retry(lambda: client.conversations_history(**kwargs))
+        for m in resp.get("messages", []):
+            ts = m.get("ts", "0")
+            try:
+                ts_f = float(ts)
+                if ts_f > max_seen:
+                    max_seen = ts_f
+            except ValueError:
+                pass
+            if not _filter_msg(m, bot_uid):
+                continue
+            kept.append(
+                Message(
+                    channel_id=channel_id,
+                    ts=ts,
+                    user_id=m.get("user"),
+                    text=m.get("text", ""),
+                    thread_ts=m.get("thread_ts"),
+                    permalink=None,
+                )
+            )
+        cursor = resp.get("response_metadata", {}).get("next_cursor") or None
+        if not cursor or len(kept) >= max_messages:
+            break
+
+    def _ts_key(msg: Message) -> float:
+        try:
+            return float(msg.ts)
+        except (TypeError, ValueError):
+            return 0.0
+
+    kept.sort(key=_ts_key)
+    newest = f"{max_seen:.6f}" if max_seen > 0 else (oldest_str if oldest else None)
+    return kept, newest
+
+
 def get_thread(client, channel: str, ts: str) -> list[Message]:
     out: list[Message] = []
     cursor: str | None = None

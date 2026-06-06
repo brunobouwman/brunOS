@@ -1,0 +1,19 @@
+[Unit]
+Description=brunoosbrain comms capture (high-signal knowledge from comms channels)
+After=network-online.target
+Wants=network-online.target
+OnFailure=brunoosbrain-alert@%n.service
+
+[Service]
+Type=oneshot
+User=bruno
+Group=bruno
+WorkingDirectory=/home/bruno/claude-second-brain
+EnvironmentFile=/home/bruno/claude-second-brain/.claude/.env
+Environment=TZ=America/Sao_Paulo
+Environment=PATH=/usr/local/bin:/usr/bin:/bin
+ExecStart=/usr/local/bin/uv run python .claude/scripts/comms_capture.py
+TimeoutStartSec=1800
+LogsDirectory=brunoosbrain
+StandardOutput=append:/var/log/brunoosbrain/comms-capture.log
+StandardError=append:/var/log/brunoosbrain/comms-capture.log

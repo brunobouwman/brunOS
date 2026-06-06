@@ -1,0 +1,44 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.bruno.brunos.comms-capture</string>
+
+    <!-- Failover unit: ships disabled on the Mac (reflection/dream run on the
+         VPS; MEMORY.md/playbook writes aren't dual-run safe). Operator enables
+         on failover — see deploy/bin/install-mac-launchd.sh. -->
+    <key>Disabled</key>
+    <true/>
+
+    <key>WorkingDirectory</key>
+    <string>/Users/brunobouwman/Documents/brunOS-brain</string>
+
+    <key>ProgramArguments</key>
+    <array>
+        <string>/Users/brunobouwman/.local/bin/uv</string>
+        <string>run</string>
+        <string>python</string>
+        <string>.claude/scripts/comms_capture.py</string>
+    </array>
+
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>TZ</key>
+        <string>America/Sao_Paulo</string>
+        <key>PATH</key>
+        <string>/Users/brunobouwman/.local/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin</string>
+    </dict>
+
+    <key>StandardOutPath</key>
+    <string>/Users/brunobouwman/Library/Logs/com.bruno.brunos.comms-capture.log</string>
+    <key>StandardErrorPath</key>
+    <string>/Users/brunobouwman/Library/Logs/com.bruno.brunos.comms-capture.log</string>
+
+    <key>StartCalendarInterval</key>
+    <dict>
+        <key>Hour</key><integer>22</integer>
+        <key>Minute</key><integer>0</integer>
+    </dict>
+</dict>
+</plist>
