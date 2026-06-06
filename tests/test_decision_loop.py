@@ -153,6 +153,24 @@ def test_extract_ref_answers():
     check(md._extract_ref_answers("no ref here") == [], "no ref → empty")
 
 
+def test_reconcile_skips_slack_without_outstanding():
+    print("[test_reconcile_skips_slack_without_outstanding]")
+    with tempfile.TemporaryDirectory() as td:
+        q = Path(td) / "decision_questions.json"
+        # only answered / never-asked entries → nothing outstanding → no Slack read
+        q.write_text(json.dumps([
+            {"id": "a", "asked": True, "answered": True},
+            {"id": "b", "asked": False, "answered": False},
+        ]), encoding="utf-8")
+        with _patch(md, DECISION_QUESTIONS_PATH=q, _log=lambda *a, **k: None):
+            n = md._reconcile_from_slack(dry_run=False)
+        check(n == 0, "returns 0 (and skips the Slack read) when nothing is asked-unanswered")
+        # empty queue file → also a clean skip
+        q.write_text("[]", encoding="utf-8")
+        with _patch(md, DECISION_QUESTIONS_PATH=q, _log=lambda *a, **k: None):
+            check(md._reconcile_from_slack(dry_run=False) == 0, "empty queue → 0")
+
+
 def test_reconcile_patches_entry_and_marks_answered():
     print("[test_reconcile_patches_entry_and_marks_answered]")
     with tempfile.TemporaryDirectory() as td:
@@ -190,6 +208,7 @@ def main():
     test_delivery_marks_asked_only_on_confirm()
     test_delivery_respects_max_per_day()
     test_extract_ref_answers()
+    test_reconcile_skips_slack_without_outstanding()
     test_reconcile_patches_entry_and_marks_answered()
     print(f"\n{_PASS} passed, {_FAIL} failed")
     return 1 if _FAIL else 0
