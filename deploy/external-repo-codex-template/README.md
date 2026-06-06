@@ -26,7 +26,7 @@ Codex doesn't distinguish project vs. local config the way Claude Code does (no 
 ```bash
 # In the new project repo:
 mkdir -p .codex
-cp /Users/brunobouwman/Documents/claude-second-brain/deploy/external-repo-codex-template/.codex/config.toml .codex/config.toml
+cp /Users/brunobouwman/Documents/brunOS-brain/deploy/external-repo-codex-template/.codex/config.toml .codex/config.toml
 # Use the same slug convention as Claude Code captures so both end up in the
 # same per-project inbox folder:
 sed -i '' 's/<project>/vertik-lab-agent/g; s/<default-export>/personal/g' .codex/config.toml
@@ -75,7 +75,7 @@ The Codex rollout parser strips `base_instructions`, `turn_context`, `response_i
 
 ## Path assumptions
 
-The template hardcodes `/Users/brunobouwman/Documents/claude-second-brain/` (Bruno's Mac, primary host). For:
+The template hardcodes `/Users/brunobouwman/Documents/brunOS-brain/` (Bruno's Mac, primary host). For:
 
 - **Lisa's Mac**: replace with her clone path; LisaOS-equivalent.
 - **VPS**: Codex isn't installed on the VPS today, so this template isn't relevant there. If that changes, the path is `/home/bruno/claude-second-brain/.venv/bin/python ...`.

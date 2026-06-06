@@ -23,5 +23,5 @@ matcher = "manual|auto"
 
 [[hooks.PreCompact.hooks]]
 type = "command"
-command = "/Users/brunobouwman/Documents/claude-second-brain/.venv/bin/python /Users/brunobouwman/Documents/claude-second-brain/.claude/hooks/codex-precompact-flush.py --project=<project> --default-export=<default-export>"
+command = "/Users/brunobouwman/Documents/brunOS-brain/.venv/bin/python /Users/brunobouwman/Documents/brunOS-brain/.claude/hooks/codex-precompact-flush.py --project=<project> --default-export=<default-export>"
 timeout = 30

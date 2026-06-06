@@ -16,7 +16,7 @@
     <true/>
 
     <key>WorkingDirectory</key>
-    <string>/Users/brunobouwman/Documents/claude-second-brain</string>
+    <string>/Users/brunobouwman/Documents/brunOS-brain</string>
 
     <!-- Run via uv (which holds Full Disk Access, granted for codex-watcher) so
          launchd can read the ~/Documents-resident vault despite macOS TCC. A

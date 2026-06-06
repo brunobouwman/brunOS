@@ -6,7 +6,7 @@
     <string>com.bruno.brunos.codex-watcher</string>
 
     <key>WorkingDirectory</key>
-    <string>/Users/brunobouwman/Documents/claude-second-brain</string>
+    <string>/Users/brunobouwman/Documents/brunOS-brain</string>
 
     <key>ProgramArguments</key>
     <array>

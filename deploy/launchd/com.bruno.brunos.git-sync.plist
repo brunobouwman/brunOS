@@ -17,7 +17,7 @@
          the vault via shared.vault_path() and runs git there. A direct git exec on the
          vault hits "Operation not permitted"; going through uv inherits FDA to git. -->
     <key>WorkingDirectory</key>
-    <string>/Users/brunobouwman/Documents/claude-second-brain</string>
+    <string>/Users/brunobouwman/Documents/brunOS-brain</string>
 
     <key>ProgramArguments</key>
     <array>

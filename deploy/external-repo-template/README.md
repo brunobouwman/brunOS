@@ -24,12 +24,12 @@ Capture (SessionEnd/PreCompact) and injection (SessionStart) share the same `<pr
 ```bash
 # In the new project repo (solo / cemetery — settings.json is fine):
 mkdir -p .claude
-cp /Users/brunobouwman/Documents/claude-second-brain/deploy/external-repo-template/.claude/settings.json .claude/settings.json
+cp /Users/brunobouwman/Documents/brunOS-brain/deploy/external-repo-template/.claude/settings.json .claude/settings.json
 sed -i '' 's/<project>/cemetery/g; s|<context-file>|projects/memorial-colinas.md|g; s/<default-export>/linos-protostack/g' .claude/settings.json
 
 # In a team-shared repo (Vertik, etc — use settings.local.json):
 mkdir -p .claude
-cp /Users/brunobouwman/Documents/claude-second-brain/deploy/external-repo-template/.claude/settings.json .claude/settings.local.json
+cp /Users/brunobouwman/Documents/brunOS-brain/deploy/external-repo-template/.claude/settings.json .claude/settings.local.json
 sed -i '' 's/<project>/vertik-something/g; s|<context-file>|projects/vertik.md|g; s/<default-export>/personal/g' .claude/settings.local.json
 # Verify .claude or settings.local.json is gitignored before committing other changes.
 ```
@@ -47,7 +47,7 @@ The Phase B reflection classifier can override per-item, but this is the session
 
 ## Path assumptions
 
-The template hardcodes `/Users/brunobouwman/Documents/claude-second-brain/` (Bruno's Mac). For:
+The template hardcodes `/Users/brunobouwman/Documents/brunOS-brain/` (Bruno's Mac). For:
 - **Lisa's Mac**: replace with her clone path; LisaOS uses the same pattern with its own scripts.
 - **VPS** (per Phase 9): `/home/bruno/claude-second-brain/.venv/bin/python /home/bruno/claude-second-brain/.claude/hooks/...`.
 
