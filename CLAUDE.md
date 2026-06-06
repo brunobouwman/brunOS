@@ -135,6 +135,9 @@ uv run python .claude/scripts/memory_dream.py --reconcile [--dry-run]           
 # Modular cadence (Phase B) — generate split timer units from brain-config.json:
 uv run python .claude/scripts/gen_schedules.py [--platform mac|vps|both] [--dry-run]
 
+# Comms-capture feeder (BaaS) — distil high-signal knowledge from comms channels → inbox:
+uv run python .claude/scripts/comms_capture.py [--dry-run] [--since-hours N]
+
 # Knowledge-gap scan (BaaS C1 — stale ongoing-entity detector):
 uv run python .claude/scripts/gap_analysis.py            # human table
 uv run python .claude/scripts/gap_analysis.py --json     # machine-readable
@@ -445,6 +448,21 @@ above) — so this is the full Phase B activation, not just unit files.
 - `decision_questions.json` — rationale-prompt queue.
 
 `CLAUDE_INVOKED_BY` value added this phase: `dream` (set before the SDK import).
+
+## Comms-capture feeder (BaaS — knowledge extraction from comms channels)
+
+PRD/scope: `BrunOS/Memory/projects/Brain/comms_capture_feeders.md` (+ the access/routing primitive in `company_brain_channel_registry.md`). ClickUp: `86ca5bgak`.
+
+**The insight:** code sessions capture knowledge ambiently (SessionEnd/PreCompact → `_inbox/`); people whose work *is* chat have no sessions. `comms_capture.py` (`CLAUDE_INVOKED_BY=comms-capture`) is the non-tech equivalent: a cadence-driven feeder that reads configured comms channels and Haiku-distils **HIGH-SIGNAL ONLY** (decisions / commitments / client+project facts / open questions — never chatter) into the **same** `_inbox/sessions/<project>/` captures code sessions write (`shared.write_inbox_capture`). So reflection (strip → clear → federate) + dreaming (playbook) process comms knowledge **unchanged**, and it reaches the company brain via the existing federation path. **The heartbeat stays reactive** (notify/draft) — capture is this separate, cadence-configurable feeder, not a heartbeat extension.
+
+- **Channel selection = the shared `channels` registry** in brain-config (`company_brain_channel_registry.md` — the same access+routing primitive the company-brain chat skills, ClickUp `86ca5c6nz`, will read). Keyed `"<surface>:<id>"` (e.g. `"slack:C012345"`). The feeder ingests only entries that are `surface: slack`, `status: enabled`, `ingestion_mode ∈ {ingest-and-answer, digest-only}`, and that declare a `capture: {project, default_export}` routing block. Everything else (`disabled`/`ask-only`, unsupported surface, missing/invalid `capture`, surface/key mismatch, bad export target) is **fail-closed** (skipped + logged). The feeder reads only the *ingestion* subset of the registry; governance fields (`allowed_users`/`required_tier`/personas) belong to the chat-skills task.
+- **Own watermark, never the heartbeat's.** `slack.since_last_run()` mutates the shared `slack-state.json` cursors the heartbeat owns — so the feeder uses a **stateless** `slack.fetch_channel_history()` (no state writes) + its own per-channel cursor in `.claude/data/state/comms-capture-state.json`. The two readers never consume each other's messages (the scope doc's "share the fetch later" stays deferred). The cursor advances over *everything scanned* (incl. NONE / sub-threshold / filtered-noise windows) so re-runs are no-ops; a distillation **failure holds the cursor** (retried next run).
+- **Privacy:** scoping = the in-scope channel allowlist (personal/family channels simply aren't in the registry → never read) + `redaction.exclude_people` (default **true** → `scrub_excluded_entities`) + always-on `scrub_secrets`, all before the capture hits disk. Reflection re-applies the authoritative strip before any federation clear; the feeder's scrub is defense-in-depth (fail-open only on a missing `_excluded-people.md`). External message content enters the Haiku prompt via `sanitize.wrap_external`.
+- **Source-dispatch seam:** `SOURCE_READERS` maps a surface → reader; **Slack is implemented**, and Gmail / WhatsApp / Telegram / meeting-transcript (Otter/Meet) become a reader + a `SUPPORTED_SURFACES` entry, no refactor. NB the heartbeat's Gmail read is **metadata-only** (no bodies) and reactive — extracting email knowledge needs its own body-fetching feeder on this seam, not the Slack feeder.
+- **Config** (`brain_config.DEFAULTS`): `comms_capture.{enabled, cadence (default daily@22:00), hours, lookback_hours, min_messages}` are the feeder knobs; top-level `channels` is the shared registry (empty by default → the feeder is a clean no-op that never constructs a Slack client, so `enabled:true` is safe even with no token). `gen_schedules.py` emits `brunoosbrain-comms-capture.{service,timer}` (VPS, `OnCalendar` pinned to America/Sao_Paulo) + `com.bruno.brunos.comms-capture.plist` (Mac, `Disabled=true` for failover) as a 4th unit. No SyncReporter in v1 (matches `memory_dream.py`; healthchecks provisioning is a separate Track D step).
+- **Tests:** `tests/test_comms_capture.py` (standalone; Haiku + Slack stubbed).
+
+`CLAUDE_INVOKED_BY` value added: `comms-capture` (set before the SDK import).
 
 ## Deployment (Phase 9)
 

@@ -62,6 +62,27 @@ DEFAULTS: dict = {
     # Pluggable "ask the person" surface. adapter ∈ {slack, none, ...};
     # target=None means the adapter's default destination (Slack DM channel).
     "notify": {"adapter": "slack", "target": None},
+    # Comms-capture feeder (BaaS): a cadence-driven pass that reads configured
+    # comms channels and distils HIGH-SIGNAL knowledge into the SAME
+    # _inbox/sessions/ captures code sessions write — so reflection + dreaming +
+    # federation process comms knowledge unchanged. These are the feeder-level
+    # knobs only; channel SELECTION reads the shared `channels` registry below.
+    "comms_capture": {
+        "enabled": True,
+        "cadence": "daily@22:00",
+        "hours": "08-20",        # only consulted when cadence == "hourly"
+        "lookback_hours": 24,    # cold-start window per channel on first run
+        "min_messages": 1,       # skip distillation below this many new messages
+    },
+    # Channel registry — the shared access+routing primitive
+    # (projects/Brain/company_brain_channel_registry.md). Keyed "<surface>:<id>"
+    # (e.g. "slack:C012345"). The comms-capture feeder reads the ingestion-relevant
+    # subset (surface / status / ingestion_mode / redaction + a per-channel
+    # capture:{project, default_export} routing block) and FAILS CLOSED on unknown
+    # or malformed entries; the company-brain chat skills (ClickUp 86ca5c6nz) read
+    # the governance fields (allowed_users / required_tier / personas). Empty by
+    # default → the feeder is a clean no-op (no Slack client is even constructed).
+    "channels": {},
 }
 
 
