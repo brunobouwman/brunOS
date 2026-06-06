@@ -236,7 +236,7 @@ that mirror, never BrunOS's real inbox.
 - **Services**: `linosbrain-*`
 - **Log dir**: `/var/log/linosbrain/`
 - **Repo**: `/home/linos/claude-second-brain/` (clone of this repo — same code, different env)
-- **Vault**: `/home/linos/LinOS/` (own private GitHub repo: `brunobouwman/Linos`)
+- **Vault**: `/home/linos/LinOS/` (own private GitHub repo: `protostack-linos/linos-brain`)
 - **Inbox mirror**: `/home/linos/brunos-inbox/sessions/` (LinOS-readable; written only by the bruno-side push — see below. Set `BRUNOS_INBOX_PATH` in LinOS's `.claude/.env` to this path.)
 
 ### Cleared-inbox transport (bruno → LinOS)
@@ -277,6 +277,7 @@ only that `bruno` can read the src and write the dst.
 | `linosbrain-vault-sync.timer` | `linos` | Every 2 min | LinOS vault ↔ GitHub git-sync |
 | `linosbrain-reflect.timer` | `linos` | 08:30 BRT daily | LinOS own-vault reflection (30 min after BrunOS reflect) |
 | `linosbrain-consumer.timer` | `linos` | 09:00 BRT daily | Integrate the inbox mirror into LinOS vault |
+| `linosbrain-slackbot-restart.timer` | root | Sunday 04:10 BRT | Restart LinOS company chat if enabled |
 
 Ordering matters: BrunOS reflect (08:00) stamps `cleared` → bruno-side push
 (08:45) mirrors scope+cleared captures out → LinOS consumer (09:00) integrates.
@@ -299,23 +300,89 @@ See `CLAUDE.md` § Phase C.5 and the plan at `.agents/plans/dt-*-baas-track-a-co
 #           (BRUNOS_INBOX_PATH=/home/linos/brunos-inbox/sessions, LINOS_VAULT_PATH=/home/linos/LinOS),
 #           and the bruno-side brunoosbrain-linos-inbox-sync timer is installed (populates the mirror).
 
-# Symlink units:
-ssh brunoos 'for f in /home/linos/claude-second-brain/deploy/systemd/linosbrain-*.{service,timer}; do
-  sudo ln -sf "$f" /etc/systemd/system/"$(basename "$f")"
-done && sudo systemctl daemon-reload'
+# Symlink units. Run the glob under sudo because /home/linos is private:
+ssh brunoos 'sudo bash -c '"'"'for f in /home/linos/claude-second-brain/deploy/systemd/linosbrain-*.service /home/linos/claude-second-brain/deploy/systemd/linosbrain-*.timer; do
+  ln -sf "$f" /etc/systemd/system/"$(basename "$f")"
+done'"'"' && sudo systemctl daemon-reload'
 
 # Log dir:
 ssh brunoos 'sudo mkdir -p /var/log/linosbrain && sudo chown linos:linos /var/log/linosbrain'
 
-# Dry-run first:
+# Claude auth: run once as the linos Unix user before consumer dogfood:
+ssh -t brunoos 'sudo -H -u linos claude login'
+
+# Consumer dry-run first:
 ssh brunoos 'sudo -u linos /usr/local/bin/uv run python \
   /home/linos/claude-second-brain/.claude/scripts/linos_consumer.py --dry-run 2>&1'
 
-# Enable timers:
+# Enable vault-sync first. Enable reflect/consumer only after identity + dogfood pass:
 ssh brunoos 'sudo systemctl enable --now \
-  linosbrain-vault-sync.timer \
-  linosbrain-reflect.timer \
-  linosbrain-consumer.timer'
+  linosbrain-vault-sync.timer'
+```
+
+Live dogfood state (2026-06-06): `linos` user/repo/vault/logs are provisioned,
+LinOS vault sync is live, the LinOS identity seed is committed, the Bruno-side
+`brunoosbrain-linos-inbox-sync.timer` is enabled, and `linosbrain-consumer.timer`
+is enabled for 09:00 BRT. Consumer dogfood imported 9 eligible Colinas captures
+into distinct `Memory/joint/colinas/*.md` notes and wrote 9 ack manifests.
+Stage-0 Slack chat is also live behind the deterministic channel registry.
+
+### LinOS company chat (task 9 prep)
+
+LinOS can reuse the Phase 7 Slack bot, but only in a LinOS-specific company
+profile. Stage 0 is founder-only dogfood; the product target is a channel-scoped
+company brain that can answer inside approved groups and learn from them without
+requiring every individual brain to be added everywhere.
+
+The prepared units are:
+
+- `linosbrain-slackbot.service`
+- `linosbrain-slackbot-restart.service`
+- `linosbrain-slackbot-restart.timer`
+
+The service sets `CHAT_BRAIN_PROFILE=linos`, which makes
+`.claude/chat/system_prompt.py` load the company-brain files (`SOUL.md`,
+`USER.md`, `LINMEMORY.md`, `STANDARDS.md`, `DECISIONS.md`, `ROUTINES.md`,
+`ACCESS_POLICY.md`) instead of the BrunOS personal-memory context. It also sets
+`CHAT_FLUSH_ENABLED=0`; the existing chat transcript flush writes through the
+personal producer pipeline, so LinOS chat transcripts stay out of company memory
+until a company-brain write contract is designed. For `CHAT_BRAIN_PROFILE=linos`,
+the daemon enables deterministic channel registry checks by default
+(`CHAT_CHANNEL_REGISTRY_ENABLED=1` unless explicitly disabled).
+
+Product requirements before broad channel deployment:
+
+- Add a channel registry to `ACCESS_POLICY.md` / `brain-config.json`: channel id,
+  audience, allowed Slack user ids, persona/skill route, allowed read scopes,
+  allowed write targets, ingestion mode (`ask-only`, `ingest-and-answer`,
+  `digest-only`), retention, and redaction rules.
+- Fail closed for unknown channels/scopes. The bot can ask for operator
+  configuration, but must not infer access rights from channel names alone.
+- Build a company chat-ingestion path separate from `dispatch_flush`; group
+  conversation learning should write scoped company memory with provenance, not
+  personal daily logs.
+- Preserve brain-to-brain access: individual brains remain the worker's primary
+  work surface and can query the company brain through a scoped RPC/API when
+  they need company context.
+
+For stage-0 LinOS dogfood, these conditions are already satisfied. For any new
+company brain or broader channel rollout, do not enable the service until all
+are true:
+
+- A separate LinOS Slack app exists with `SLACK_BOT_TOKEN` and `SLACK_APP_TOKEN`
+  stored in `/home/linos/claude-second-brain/.claude/.env`.
+- `Memory/Brain/brain-config.json` has the real `slack:<channel_id>` and
+  `allowed_users` Slack user ids set to `status: enabled`.
+- The Slack app is founder/operator-only and subscribes narrowly (`message.im`
+  and optionally `app_mention`; no broad channel-message firehose).
+- The runtime brain user can make Claude SDK calls without auth/rate-limit
+  failures.
+
+Smoke-test before enabling:
+
+```bash
+ssh brunoos 'sudo -H -u linos bash -lc '"'"'cd /home/linos/claude-second-brain &&
+  CHAT_BRAIN_PROFILE=linos CHAT_FLUSH_ENABLED=0 /usr/local/bin/uv run python .claude/chat/bot.py --smoke-test'"'"''
 ```
 
 ### Verify
@@ -390,6 +457,10 @@ deploy/
     brunoosbrain-news-digest.{service,timer}
     brunoosbrain-slackbot.service
     brunoosbrain-vault-sync.{service,timer}
+    brunoosbrain-linos-inbox-sync.{service,timer}
+    linosbrain-slackbot.service
+    linosbrain-slackbot-restart.{service,timer}
+    linosbrain-{consumer,reflect,vault-sync}.{service,timer}
     brunoosbrain-alert@.service             template — OnFailure alert (Slack via vault_sync.py --emit-alert)
   vault/
     gitignore                               template for BrunOS/.gitignore (drafts/active/, personal/finance.md, .DS_Store, .obsidian/)

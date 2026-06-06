@@ -25,6 +25,7 @@ from pathlib import Path
 REPO_ROOT = Path(__file__).resolve().parents[3]
 sys.path.insert(0, str(REPO_ROOT / ".claude" / "scripts"))
 
+from chat.channel_registry import render_context, resolve_slack_event  # noqa: E402
 from chat.session_manager import SessionManager  # noqa: E402
 from sanitize import wrap_external  # noqa: E402
 
@@ -114,12 +115,28 @@ def _strip_bot_mention(text: str, bot_user_id: str) -> str:
     return re.sub(rf"<@{re.escape(bot_user_id)}>\s*", "", text).strip()
 
 
-def register(app, bot_user_id: str, session_manager: SessionManager) -> None:
+def register(
+    app,
+    bot_user_id: str,
+    session_manager: SessionManager,
+    *,
+    enforce_channel_registry: bool = False,
+) -> None:
     """Wire DM and @mention events to the SDK round-trip."""
 
     async def _route(event: dict, say, user_text: str, *, surface: str) -> None:
         session_key = _derive_session_key(event)
         slack_thread_ts = _derive_slack_thread_ts(event)
+        if enforce_channel_registry:
+            decision = resolve_slack_event(event)
+            if not decision.allowed:
+                _log(
+                    f"[chat] registry refused {surface} for {session_key}: "
+                    f"{decision.reason}"
+                )
+                await say(text=decision.refusal_text, thread_ts=slack_thread_ts)
+                return
+            user_text = render_context(decision) + user_text
         # Lock is owned by the SessionManager so the idle reaper never closes a
         # client mid-request.
         async with session_manager.lock_for(session_key):

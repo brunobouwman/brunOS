@@ -37,7 +37,7 @@ from chat.system_prompt import build_chat_system_prompt  # noqa: E402
 SLACK_STATE_PATH = STATE_DIR / "slack-state.json"
 CHAT_DB_PATH = STATE_DIR / "chat.db"
 
-CHAT_MODEL = "claude-sonnet-4-6"
+DEFAULT_CHAT_MODEL = "claude-sonnet-4-6"
 MAX_TURNS = 15
 
 
@@ -54,6 +54,13 @@ def _persist_bot_user_id(bot_user_id: str) -> None:
     state.setdefault("channels", {})
     state["bot_user_id"] = bot_user_id
     save_state(SLACK_STATE_PATH, state)
+
+
+def _env_flag(name: str, *, default: bool) -> bool:
+    raw = os.environ.get(name)
+    if raw is None or raw.strip() == "":
+        return default
+    return raw.strip().lower() not in {"0", "false", "no", "off"}
 
 
 def _build_options_factory(system_prompt_builder):
@@ -76,7 +83,7 @@ def _build_options_factory(system_prompt_builder):
             allowed_tools=["Read", "Write", "Edit", "Bash"],
             setting_sources=["project"],
             system_prompt=system_prompt_builder(),
-            model=CHAT_MODEL,
+            model=os.environ.get("CHAT_MODEL", DEFAULT_CHAT_MODEL),
             max_turns=MAX_TURNS,
             resume=resume,
             fork_session=False,
@@ -107,6 +114,7 @@ async def _smoke_test(bot_token: str) -> int:
 
 async def main_async(smoke_test: bool) -> int:
     load_env()
+    chat_profile = os.environ.get("CHAT_BRAIN_PROFILE", "brunos").strip().lower()
     bot_token = os.environ.get("SLACK_BOT_TOKEN", "").strip()
     app_token = os.environ.get("SLACK_APP_TOKEN", "").strip()
     if not bot_token:
@@ -134,12 +142,25 @@ async def main_async(smoke_test: bool) -> int:
         f"[chat] system prompt builds at {len(build_chat_system_prompt())} chars "
         f"(rebuilt fresh per session)"
     )
+    flush_enabled = _env_flag("CHAT_FLUSH_ENABLED", default=True)
+    _log(f"[chat] transcript flush enabled={flush_enabled}")
+    registry_enabled = _env_flag(
+        "CHAT_CHANNEL_REGISTRY_ENABLED",
+        default=(chat_profile == "linos"),
+    )
+    _log(f"[chat] channel registry enabled={registry_enabled}")
 
     session_manager = SessionManager(
         options_factory=_build_options_factory(build_chat_system_prompt),
         db_path=CHAT_DB_PATH,
+        flush_enabled=flush_enabled,
     )
-    register(app, bot_user_id, session_manager)
+    register(
+        app,
+        bot_user_id,
+        session_manager,
+        enforce_channel_registry=registry_enabled,
+    )
 
     handler = AsyncSocketModeHandler(app, app_token=app_token)
 
