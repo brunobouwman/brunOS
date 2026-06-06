@@ -1,5 +1,5 @@
 [Unit]
-Description=linosbrain company-brain reflection
+Description=linosbrain company-brain dreaming
 After=network-online.target
 Wants=network-online.target
 OnFailure=linosbrain-alert@%n.service
@@ -14,8 +14,8 @@ Environment=TZ=America/Sao_Paulo
 Environment=COMPANY_BRAIN_PROFILE=linos
 Environment=COMPANY_BRAIN_NAME=LinOS
 Environment=PATH=/usr/local/bin:/usr/bin:/bin
-ExecStart=/usr/local/bin/uv run python .claude/scripts/company_brain_reflect.py reflect --profile linos
+ExecStart=/usr/local/bin/uv run python .claude/scripts/company_brain_reflect.py dream --profile linos
 TimeoutStartSec=600
 LogsDirectory=linosbrain
-StandardOutput=append:/var/log/linosbrain/reflect.log
-StandardError=append:/var/log/linosbrain/reflect.log
+StandardOutput=append:/var/log/linosbrain/dream.log
+StandardError=append:/var/log/linosbrain/dream.log

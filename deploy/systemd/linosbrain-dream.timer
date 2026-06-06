@@ -1,0 +1,10 @@
+[Unit]
+Description=linosbrain company-brain dreaming - daily 09:25 BRT (after reflection)
+
+[Timer]
+OnCalendar=*-*-* 09:25 America/Sao_Paulo
+Persistent=true
+Unit=linosbrain-dream.service
+
+[Install]
+WantedBy=timers.target

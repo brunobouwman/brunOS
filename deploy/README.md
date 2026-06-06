@@ -275,20 +275,26 @@ only that `bruno` can read the src and write the dst.
 |-------|---------|----------|---------|
 | `brunoosbrain-linos-inbox-sync.timer` | `bruno` | 08:45 BRT daily | Push cleared+in-scope captures → LinOS inbox mirror |
 | `linosbrain-vault-sync.timer` | `linos` | Every 2 min | LinOS vault ↔ GitHub git-sync |
-| `linosbrain-reflect.timer` | `linos` | 08:30 BRT daily | LinOS own-vault reflection (30 min after BrunOS reflect) |
 | `linosbrain-consumer.timer` | `linos` | 09:00 BRT daily | Integrate the inbox mirror into LinOS vault |
+| `linosbrain-reflect.timer` | `linos` | 09:15 BRT daily | Company-brain leadership/gap reflection after consumer |
+| `linosbrain-dream.timer` | `linos` | 09:25 BRT daily | Company-brain playbook proposals after reflection |
 | `linosbrain-slackbot-restart.timer` | root | Sunday 04:10 BRT | Restart LinOS company chat if enabled |
 
 Ordering matters: BrunOS reflect (08:00) stamps `cleared` → bruno-side push
-(08:45) mirrors scope+cleared captures out → LinOS consumer (09:00) integrates.
-The gaps absorb reflect overruns on the shared CX21.
+(08:45) mirrors scope+cleared captures out → LinOS consumer (09:00) integrates
+→ company-brain reflection/dreaming (09:15/09:25) produces reviewable
+leadership, gap, and proposed playbook artifacts. The gaps absorb reflect
+overruns on the shared CX21.
 
 ### Coexistence invariants
 
 - `linos` never reads `/home/bruno`; the only data crossing is what `bruno`'s push explicitly mirrors out (scope+cleared). `linos_consumer.py` reads only `/home/linos/brunos-inbox/`.
 - No cross-user `systemctl` calls: each brain manages only its own `*osbrain-*`.
 - Consumer watermark state: `/home/linos/claude-second-brain/.claude/data/state/consumer_watermark.json`.
+- Company-brain reflection/dreaming state: `/home/linos/claude-second-brain/.claude/data/state/company_brain_reflect_linos.json`.
 - Ack manifests: `/home/linos/LinOS/Memory/_acks/brunos/<capture_id>.json`.
+- Reflection artifacts: `/home/linos/LinOS/Memory/digests/leadership/<ISO-week>.md` and `/home/linos/LinOS/Memory/digests/gaps/<date>.md`.
+- Dreaming artifacts: `/home/linos/LinOS/Memory/playbook/company/<date>.md` with `status: proposed`.
 
 ### First-time deploy (summary)
 
@@ -311,11 +317,14 @@ ssh brunoos 'sudo mkdir -p /var/log/linosbrain && sudo chown linos:linos /var/lo
 # Claude auth: run once as the linos Unix user before consumer dogfood:
 ssh -t brunoos 'sudo -H -u linos claude login'
 
-# Consumer dry-run first:
+# Consumer and company-brain routine dry-runs first:
 ssh brunoos 'sudo -u linos /usr/local/bin/uv run python \
   /home/linos/claude-second-brain/.claude/scripts/linos_consumer.py --dry-run 2>&1'
+ssh brunoos 'sudo -H -u linos bash -lc '"'"'cd /home/linos/claude-second-brain && \
+  uv run python .claude/scripts/company_brain_reflect.py reflect --profile linos --dry-run && \
+  uv run python .claude/scripts/company_brain_reflect.py dream --profile linos --dry-run'"'"''
 
-# Enable vault-sync first. Enable reflect/consumer only after identity + dogfood pass:
+# Enable vault-sync first. Enable consumer/reflect/dream only after identity + dogfood pass:
 ssh brunoos 'sudo systemctl enable --now \
   linosbrain-vault-sync.timer'
 ```
@@ -326,6 +335,27 @@ LinOS vault sync is live, the LinOS identity seed is committed, the Bruno-side
 is enabled for 09:00 BRT. Consumer dogfood imported 9 eligible Colinas captures
 into distinct `Memory/joint/colinas/*.md` notes and wrote 9 ack manifests.
 Stage-0 Slack chat is also live behind the deterministic channel registry.
+Company-brain reflection/dreaming uses the reusable
+`.claude/scripts/company_brain_reflect.py` routine with
+`COMPANY_BRAIN_PROFILE=linos`; `linosbrain-reflect.timer` runs at 09:15 BRT and
+`linosbrain-dream.timer` runs at 09:25 BRT.
+
+### Reusing this for client company brains
+
+The LinOS setup is the first profile of a generic company-brain bootstrap. For
+each client/company brain, create a dedicated Unix user, repo checkout, vault
+repo, systemd namespace, and env:
+
+```bash
+COMPANY_BRAIN_PROFILE=<client-slug>
+COMPANY_BRAIN_NAME=<Client Brain Name>
+COMPANY_BRAIN_VAULT_PATH=/home/<user>/<CompanyVault>
+BRUNOS_INBOX_PATH=/home/<user>/<producer-inbox-mirror>/sessions
+```
+
+The same `company_brain_reflect.py` commands write only reviewable company
+artifacts: leadership digests, gap digests, and proposed playbooks. They should
+run after that company's consumer/import pass, never before it.
 
 ### LinOS company chat (task 9 prep)
 
@@ -460,7 +490,7 @@ deploy/
     brunoosbrain-linos-inbox-sync.{service,timer}
     linosbrain-slackbot.service
     linosbrain-slackbot-restart.{service,timer}
-    linosbrain-{consumer,reflect,vault-sync}.{service,timer}
+    linosbrain-{consumer,dream,reflect,vault-sync}.{service,timer}
     brunoosbrain-alert@.service             template — OnFailure alert (Slack via vault_sync.py --emit-alert)
   vault/
     gitignore                               template for BrunOS/.gitignore (drafts/active/, personal/finance.md, .DS_Store, .obsidian/)
