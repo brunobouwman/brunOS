@@ -278,13 +278,15 @@ only that `bruno` can read the src and write the dst.
 | `linosbrain-consumer.timer` | `linos` | 09:00 BRT daily | Integrate the inbox mirror into LinOS vault |
 | `linosbrain-reflect.timer` | `linos` | 09:15 BRT daily | Company-brain leadership/gap reflection after consumer |
 | `linosbrain-dream.timer` | `linos` | 09:25 BRT daily | Company-brain playbook proposals after reflection |
+| `linosbrain-ack-sync.timer` | `linos` | 09:30 BRT daily | Push LinOS ack manifests → bruno's drop (F2 return leg) |
 | `linosbrain-slackbot-restart.timer` | root | Sunday 04:10 BRT | Restart LinOS company chat if enabled |
 
 Ordering matters: BrunOS reflect (08:00) stamps `cleared` → bruno-side push
-(08:45) mirrors scope+cleared captures out → LinOS consumer (09:00) integrates
-→ company-brain reflection/dreaming (09:15/09:25) produces reviewable
-leadership, gap, and proposed playbook artifacts. The gaps absorb reflect
-overruns on the shared CX21.
+(08:45) mirrors scope+cleared captures out → LinOS consumer (09:00) integrates +
+writes acks → company-brain reflection/dreaming (09:15/09:25) produces reviewable
+leadership, gap, and proposed playbook artifacts → ack-sync (09:30) returns the
+acks to bruno → bruno's F2 retirement (10:30) deletes the now-fully-consumed
+captures. The gaps absorb reflect overruns on the shared CX21.
 
 ### Coexistence invariants
 
@@ -295,6 +297,29 @@ overruns on the shared CX21.
 - Ack manifests: `/home/linos/LinOS/Memory/_acks/brunos/<capture_id>.json`.
 - Reflection artifacts: `/home/linos/LinOS/Memory/digests/leadership/<ISO-week>.md` and `/home/linos/LinOS/Memory/digests/gaps/<date>.md`.
 - Dreaming artifacts: `/home/linos/LinOS/Memory/playbook/company/<date>.md` with `status: proposed`.
+- Ack RETURN drop (bruno-readable): `/home/bruno/linos-acks/brunos/<capture_id>.json`, populated by `linosbrain-ack-sync`.
+
+### Ack return (the F2 prerequisite)
+
+`deploy/bin/retire_vps_inbox.py` only deletes a cleared `linos-protostack` capture once LinOS has **acked** it. The consumer writes acks into linos's `0700` home (`/home/linos/LinOS/Memory/_acks/brunos/`), so bruno can't see them — `deploy/bin/sync_acks.py` (unit `linosbrain-ack-sync`, 09:30 BRT, after the consumer) pushes them to a bruno-owned drop, the mirror of the cleared-push. One-time setup grants `linos` **least-privilege** write to that drop via ACLs (bruno's home stays `0700` for everyone else):
+
+```bash
+# 1. bruno creates the drop:
+ssh brunoos 'sudo -u bruno mkdir -p /home/bruno/linos-acks/brunos'
+# 2. grant linos TRAVERSE (x only) down the path + WRITE on the leaf, plus a
+#    default ACL so each new ack stays bruno-readable:
+ssh brunoos 'sudo setfacl -m  u:linos:x   /home/bruno /home/bruno/linos-acks && \
+             sudo setfacl -m  u:linos:rwx /home/bruno/linos-acks/brunos && \
+             sudo setfacl -d -m u:linos:rwx /home/bruno/linos-acks/brunos'
+# 3. the unit is picked up by the linosbrain-* symlink glob below; enable it:
+ssh brunoos 'sudo systemctl enable --now linosbrain-ack-sync.timer'
+# 4. backfill the acks that already exist, then verify bruno can read them:
+ssh brunoos 'sudo -u linos /usr/local/bin/uv run python \
+  /home/linos/claude-second-brain/deploy/bin/sync_acks.py'
+ssh brunoos 'ls /home/bruno/linos-acks/brunos/*.json 2>/dev/null | wc -l'
+```
+
+Set `BRUNOS_LINOS_ACK_DIR` on bruno's `.env` only if the drop differs from the `/home/bruno/linos-acks/brunos` default. Once the acks land, re-run the retire **dry-run**: the `awaiting-ack` captures flip to `ready`, and only then is `brunoosbrain-inbox-retire-vps.timer` safe to enable.
 
 ### First-time deploy (summary)
 
