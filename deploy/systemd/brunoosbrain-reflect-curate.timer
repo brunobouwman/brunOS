@@ -1,0 +1,10 @@
+[Unit]
+Description=brunoosbrain memory curation (daily-log distill + buffer drain + evict) — daily@08:00
+
+[Timer]
+OnCalendar=*-*-* 08:00:00
+Persistent=true
+Unit=brunoosbrain-reflect-curate.service
+
+[Install]
+WantedBy=timers.target

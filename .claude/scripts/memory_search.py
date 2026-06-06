@@ -6,6 +6,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import re
 import sys
 from collections import defaultdict
 from pathlib import Path
@@ -14,8 +15,19 @@ sys.path.insert(0, str(Path(__file__).parent))
 
 from db import chunks_for_files, connect, keyword_search, neighbor_files, vector_search
 from embeddings import embed_query
+from shared import load_personal_pending
 
 RRF_K = 60
+
+# Pending personal buffer (Phase B): today's extracted-but-not-yet-curated items
+# (personal_pending.json) aren't in the vault yet, so the indexer can't see them —
+# a fact learned this morning would be unrecallable until tomorrow's curation +
+# reindex. An unscoped search lexically scans the (tiny) buffer and appends up to
+# PENDING_MAX matches, tagged `pending: true`. Skipped when --path-prefix scopes
+# to a vault folder (so dedup callers — digest/dream — never see buffer rows) or
+# via --no-pending / BRUNOS_SEARCH_NO_PENDING.
+PENDING_MAX = 3
+_TOKEN_RE = re.compile(r"\w+")
 
 # Graph augmentation (C1 retrieval-v2) — one-hop spreading activation over the
 # wikilink graph after RRF. gbrain's single biggest retrieval lever. All tunable
@@ -110,17 +122,61 @@ def graph_augment(conn, fused: list[dict], k: int) -> list[dict]:
     return sorted(merged.values(), key=lambda r: -r.get("score", 0.0))[:k]
 
 
+def pending_matches(query: str, limit: int = PENDING_MAX) -> list[dict]:
+    """Lexically match the personal-pending buffer against the query.
+
+    Zero-embedding (the buffer is a handful of items): score by query/item token
+    overlap, ignoring tokens shorter than 3 chars (drops most stopwords). Returns
+    up to `limit` synthetic result rows tagged `pending: true`, with a pseudo
+    file_path so the agent can tell them apart from indexed vault hits. Empty list
+    when the buffer is empty or nothing overlaps.
+    """
+    items = load_personal_pending()
+    if not items:
+        return []
+    qtokens = {t for t in _TOKEN_RE.findall(query.lower()) if len(t) >= 3}
+    if not qtokens:
+        return []
+    scored: list[dict] = []
+    for i, it in enumerate(items):
+        if not isinstance(it, dict):
+            continue
+        text = str(it.get("text") or "").strip()
+        if not text:
+            continue
+        itokens = {t for t in _TOKEN_RE.findall(text.lower()) if len(t) >= 3}
+        overlap = len(qtokens & itokens)
+        if overlap == 0:
+            continue
+        scored.append({
+            "id": -(i + 1),  # negative pseudo-id — never collides with a real chunk id
+            "file_path": ".claude/data/state/personal_pending.json",
+            "chunk_idx": i,
+            "content": f"[pending {it.get('type', 'note')}] {text}",
+            "score": round(overlap / len(qtokens), 4),
+            "pending": True,
+            "source": str(it.get("source") or ""),
+        })
+    scored.sort(key=lambda r: -r["score"])
+    return scored[:limit]
+
+
 def search(
     query: str,
     k: int = 10,
     path_prefix: str | None = None,
     use_graph: bool = True,
+    include_pending: bool = True,
 ) -> list[dict]:
     if os.environ.get("BRUNOS_SEARCH_NO_GRAPH"):
         use_graph = False
+    if os.environ.get("BRUNOS_SEARCH_NO_PENDING"):
+        include_pending = False
     # Graph augment only makes sense on an unscoped search — a --path-prefix is a
-    # deliberate folder scope that cross-folder neighbors would violate.
+    # deliberate folder scope that cross-folder neighbors would violate. Same for
+    # the pending buffer: a scoped search (e.g. dedup) must not see buffer rows.
     use_graph = use_graph and path_prefix is None
+    include_pending = include_pending and path_prefix is None
     conn = connect()
     try:
         qemb = embed_query(query)
@@ -129,11 +185,14 @@ def search(
         kw = keyword_search(conn, query, k=inner_k, path_prefix=path_prefix)
         # Fuse a larger pool than k so the graph step has real material to seed from.
         fused = rrf_fuse([vec, kw], top_k=inner_k)
-        if use_graph:
-            return graph_augment(conn, fused, k)
-        return fused[:k]
+        results = graph_augment(conn, fused, k) if use_graph else fused[:k]
     finally:
         conn.close()
+    # Append (never interleave) buffer matches: their lexical scores aren't
+    # comparable to RRF, and they're a supplement, not a ranked competitor.
+    if include_pending:
+        results = results + pending_matches(query)
+    return results
 
 
 def main() -> None:
@@ -143,9 +202,12 @@ def main() -> None:
     ap.add_argument("--path-prefix", default=None)
     ap.add_argument("--no-graph", action="store_true",
                     help="disable wikilink graph augmentation (baseline RRF only)")
+    ap.add_argument("--no-pending", action="store_true",
+                    help="exclude the personal-pending buffer (today's not-yet-curated items)")
     args = ap.parse_args()
     results = search(
-        args.query, k=args.k, path_prefix=args.path_prefix, use_graph=not args.no_graph
+        args.query, k=args.k, path_prefix=args.path_prefix,
+        use_graph=not args.no_graph, include_pending=not args.no_pending,
     )
     print(json.dumps(results, ensure_ascii=False, indent=2))
 
