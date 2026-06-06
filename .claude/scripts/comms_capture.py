@@ -67,13 +67,18 @@ from sanitize import (  # noqa: E402
     scrub_secrets,
     wrap_external,
 )
+from sync_common import make_reporter, report_outcome  # noqa: E402
 import brain_config  # noqa: E402
 
 load_env()
 
 HAIKU_MODEL = "claude-haiku-4-5-20251001"
+HEALTHCHECK_ENV = "BRUNOS_COMMS_CAPTURE_HEALTHCHECK_URL"
 
-COMMS_STATE_PATH = STATE_DIR / "comms-capture-state.json"  # {"channels": {"slack:Cxxx": "<ts>"}}
+# Per-channel watermark cursors. NB this is NOT the monitoring status file: the
+# SyncReporter owns `comms-capture-state.json` (its <service>-state.json), so the
+# feeder's cursors live in a distinct file to avoid clobbering each other.
+COMMS_STATE_PATH = STATE_DIR / "comms-capture-cursors.json"  # {"channels": {"slack:Cxxx": "<ts>"}}
 
 # Only these ingestion modes mean "extract durable knowledge from history".
 INGEST_MODES = {"ingest-and-answer", "digest-only"}
@@ -315,19 +320,25 @@ def _cold_start_ts(lookback_hours: int) -> str:
 # --- driver -------------------------------------------------------------------
 
 
-def _run(dry_run: bool, since_hours: int | None) -> int:
+def _result(rc: int, *, selected: int = 0, captures: int = 0, errors: int = 0) -> dict:
+    """The run summary main() reports + translates to an exit code."""
+    return {"rc": rc, "channels_selected": selected, "captures": captures,
+            "channel_errors": errors}
+
+
+def _run(dry_run: bool, since_hours: int | None) -> dict:
     _log(f"comms-capture start ({_ts_brt()})")
 
     if brain_config.get("comms_capture.enabled") is False:
         _log("  comms_capture disabled by brain-config; skipping")
-        return 0
+        return _result(0)
 
     registry = brain_config.get("channels") or {}
     selected = _select_channels(registry)
     if not selected:
         _log("  no in-scope ingest channels configured; nothing to do "
              "(no comms client constructed)")
-        return 0
+        return _result(0)
 
     lookback_hours = brain_config.get("comms_capture.lookback_hours") or 24
     min_messages = brain_config.get("comms_capture.min_messages") or 1
@@ -343,6 +354,7 @@ def _run(dry_run: bool, since_hours: int | None) -> int:
     state = _load_comms_state()
     cursors = dict(state["channels"])  # mutate a copy; commit at the end
     results: list[dict] = []
+    errors = 0  # per-channel read/distill failures (cursor held → retried next run)
 
     for key, channel_id, surface, cfg in selected:
         stored = cursors.get(key)
@@ -355,6 +367,7 @@ def _run(dry_run: bool, since_hours: int | None) -> int:
             entries, newest = _read_channel(surface, channel_id, since)
         except Exception as e:  # noqa: BLE001 — one bad channel must not kill the run
             _log(f"  {key}: read failed ({type(e).__name__}: {e}); skipping, cursor held")
+            errors += 1
             continue
         newest = newest or since
 
@@ -368,6 +381,7 @@ def _run(dry_run: bool, since_hours: int | None) -> int:
             distilled = _distill(transcript)
         except Exception as e:  # noqa: BLE001
             _log(f"  {key}: distill failed ({type(e).__name__}: {e}); cursor HELD for retry")
+            errors += 1
             continue
 
         if _is_none(distilled):
@@ -409,18 +423,24 @@ def _run(dry_run: bool, since_hours: int | None) -> int:
         sys.stdout.write(json.dumps({
             "would_run": True,
             "channels_selected": len(selected),
+            "channel_errors": errors,
             "captures": results,
         }, indent=2, ensure_ascii=False))
         sys.stdout.write("\n")
         _log(f"  dry-run: {len(results)} channel(s) would capture; no writes, no cursor advance")
-        return 0
+        return _result(0, selected=len(selected), captures=len(results), errors=errors)
 
+    # Unhealthy only when EVERY configured channel failed to even read/distil
+    # (e.g. a missing token or a total model outage) — a partial failure still
+    # succeeds, with the error count surfaced in the status body. A transient
+    # single-channel hiccup must not alert-spam the daily run.
+    rc = 1 if (selected and errors >= len(selected)) else 0
     state["channels"] = cursors
     state["last_run"] = _ts_brt()
     save_state(COMMS_STATE_PATH, state)
     _log(f"comms-capture done: {len(results)} capture(s) written across "
-         f"{len(selected)} in-scope channel(s)")
-    return 0
+         f"{len(selected)} in-scope channel(s); {errors} channel error(s)")
+    return _result(rc, selected=len(selected), captures=len(results), errors=errors)
 
 
 def main(argv: list[str]) -> int:
@@ -433,7 +453,33 @@ def main(argv: list[str]) -> int:
                         help="ignore stored cursors and look back N hours (manual inspection; "
                              "pair with --dry-run)")
     args = parser.parse_args(argv[1:])
-    return _run(dry_run=args.dry_run, since_hours=args.since_hours)
+
+    # Dry-runs never report (Track D convention). Reporting lives here at the CLI
+    # boundary — make_reporter is None under BRUNOS_DISABLE_REPORTING, and
+    # report_outcome never raises, so observability can't break the feeder.
+    if args.dry_run:
+        return _run(dry_run=True, since_hours=args.since_hours)["rc"]
+
+    reporter = make_reporter("comms-capture", HEALTHCHECK_ENV)
+    try:
+        result = _run(dry_run=False, since_hours=args.since_hours)
+    except Exception as e:  # noqa: BLE001 — report the crash, then re-raise
+        report_outcome(reporter, ok=False, kind="crash", msg=f"{type(e).__name__}: {e}")
+        raise
+    ok = result["rc"] == 0
+    report_outcome(
+        reporter,
+        ok=ok,
+        kind="" if ok else "all-channels-failed",
+        msg="" if ok else
+            f"all {result['channels_selected']} configured channel(s) failed to capture",
+        extra={
+            "channels_selected": result["channels_selected"],
+            "captures": result["captures"],
+            "channel_errors": result["channel_errors"],
+        },
+    )
+    return result["rc"]
 
 
 if __name__ == "__main__":

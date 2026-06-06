@@ -90,6 +90,11 @@ SERVICE_CATALOG: dict[str, dict] = {
         "schedule": "15 9 * * *", "grace": 3600,
         "desc": "daily RAG index + search-canary health (memory_doctor.py)",
     },
+    "comms-capture": {
+        "env": "BRUNOS_COMMS_CAPTURE_HEALTHCHECK_URL",
+        "schedule": "0 22 * * *", "grace": 3600,
+        "desc": "comms-capture feeder (daily@22:00, Slack channel knowledge extraction)",
+    },
     "slackbot-watchdog": {
         "env": "BRUNOS_SLACKBOT_HEALTHCHECK_URL",
         "timeout": 900, "grace": 1800,

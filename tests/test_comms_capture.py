@@ -185,7 +185,7 @@ def test_run_writes_capture_and_advances_cursor():
         shared.vault_path = lambda: vault
         try:
             with _patch(**base):
-                rc = cc._run(dry_run=False, since_hours=None)
+                rc = cc._run(dry_run=False, since_hours=None)["rc"]
         finally:
             shared.vault_path = orig_vp
         check(rc == 0, "run returns 0")
@@ -212,7 +212,7 @@ def test_run_none_advances_cursor_no_capture():
         shared.vault_path = lambda: vault
         try:
             with _patch(**base):
-                rc = cc._run(dry_run=False, since_hours=None)
+                rc = cc._run(dry_run=False, since_hours=None)["rc"]
         finally:
             shared.vault_path = orig_vp
         check(rc == 0, "run returns 0")
@@ -235,10 +235,10 @@ def test_run_distill_failure_holds_cursor():
         shared.vault_path = lambda: vault
         try:
             with _patch(**base):
-                rc = cc._run(dry_run=False, since_hours=None)
+                rc = cc._run(dry_run=False, since_hours=None)["rc"]
         finally:
             shared.vault_path = orig_vp
-        check(rc == 0, "run returns 0 (soft failure)")
+        check(rc == 1, "all configured channel(s) failed → rc 1 (alerts via monitoring)")
         st = json.loads(state.read_text()) if state.exists() else {"channels": {}}
         check(st["channels"].get("slack:C_OK") is None, "cursor HELD on distill failure (retry next run)")
 
@@ -256,7 +256,7 @@ def test_run_min_messages_skip_no_distill():
             distill=_must_not_distill,
         )
         with _patch(**base):
-            rc = cc._run(dry_run=False, since_hours=None)
+            rc = cc._run(dry_run=False, since_hours=None)["rc"]
         check(rc == 0, "run returns 0")
         st = json.loads(state.read_text())
         check(st["channels"].get("slack:C_OK") == "2.000000", "cursor advanced even when below min_messages")
@@ -297,7 +297,7 @@ def test_disabled_is_noop():
             read=_must_not_read,
         )
         with _patch(**base):
-            rc = cc._run(dry_run=False, since_hours=None)
+            rc = cc._run(dry_run=False, since_hours=None)["rc"]
         check(rc == 0, "disabled → returns 0, no reads")
 
 
@@ -311,7 +311,7 @@ def test_empty_registry_noop_no_client():
             read=_must_not_read,
         )
         with _patch(**base):
-            rc = cc._run(dry_run=False, since_hours=None)
+            rc = cc._run(dry_run=False, since_hours=None)["rc"]
         check(rc == 0, "empty registry → returns 0, no client constructed")
 
 
@@ -327,7 +327,7 @@ def test_dry_run_writes_nothing():
         shared.vault_path = lambda: vault
         try:
             with _patch(**base):
-                rc = cc._run(dry_run=True, since_hours=None)
+                rc = cc._run(dry_run=True, since_hours=None)["rc"]
         finally:
             shared.vault_path = orig_vp
         check(rc == 0, "dry-run returns 0")
@@ -377,6 +377,70 @@ def test_fetch_channel_history_stateless():
     check(saved["n"] == 0, "no channel-cursor write to slack-state.json")
 
 
+# --------------------------------------------------------------------------- #
+# main() monitoring wiring (Track D)
+# --------------------------------------------------------------------------- #
+def test_main_dry_run_builds_no_reporter():
+    print("[test_main_dry_run_builds_no_reporter]")
+    built = {"n": 0}
+    with _patch(
+        make_reporter=lambda *a, **k: built.__setitem__("n", built["n"] + 1) or object(),
+        _run=lambda **k: {"rc": 0, "channels_selected": 0, "captures": 0, "channel_errors": 0},
+    ):
+        rc = cc.main(["comms_capture.py", "--dry-run"])
+    check(rc == 0, "dry-run returns rc 0")
+    check(built["n"] == 0, "dry-run constructs no reporter (never reports)")
+
+
+def test_main_reports_success():
+    print("[test_main_reports_success]")
+    seen = {}
+    with _patch(
+        make_reporter=lambda *a, **k: object(),
+        report_outcome=lambda rep, *, ok, kind="", msg="", extra=None: seen.update(ok=ok, extra=extra),
+        _run=lambda **k: {"rc": 0, "channels_selected": 1, "captures": 1, "channel_errors": 0},
+    ):
+        rc = cc.main(["comms_capture.py"])
+    check(rc == 0, "rc 0 propagated")
+    check(seen.get("ok") is True, "success reported")
+    check(seen.get("extra", {}).get("captures") == 1, "capture count in report body")
+
+
+def test_main_reports_failure_when_all_channels_fail():
+    print("[test_main_reports_failure_when_all_channels_fail]")
+    seen = {}
+    with _patch(
+        make_reporter=lambda *a, **k: object(),
+        report_outcome=lambda rep, *, ok, kind="", msg="", extra=None: seen.update(ok=ok, kind=kind, extra=extra),
+        _run=lambda **k: {"rc": 1, "channels_selected": 2, "captures": 0, "channel_errors": 2},
+    ):
+        rc = cc.main(["comms_capture.py"])
+    check(rc == 1, "rc 1 propagated (all channels failed)")
+    check(seen.get("ok") is False, "failure reported")
+    check(seen.get("extra", {}).get("channel_errors") == 2, "error count in report body")
+
+
+def test_main_reports_crash_then_reraises():
+    print("[test_main_reports_crash_then_reraises]")
+    seen = {}
+
+    def _boom(**k):
+        raise RuntimeError("kaboom")
+
+    raised = False
+    with _patch(
+        make_reporter=lambda *a, **k: object(),
+        report_outcome=lambda rep, *, ok, kind="", msg="", extra=None: seen.update(ok=ok, kind=kind),
+        _run=_boom,
+    ):
+        try:
+            cc.main(["comms_capture.py"])
+        except RuntimeError:
+            raised = True
+    check(raised, "crash re-raised after reporting")
+    check(seen.get("ok") is False and seen.get("kind") == "crash", "crash reported as failure")
+
+
 def main():
     test_select_channels_fail_closed()
     test_is_none()
@@ -391,6 +455,10 @@ def main():
     test_empty_registry_noop_no_client()
     test_dry_run_writes_nothing()
     test_fetch_channel_history_stateless()
+    test_main_dry_run_builds_no_reporter()
+    test_main_reports_success()
+    test_main_reports_failure_when_all_channels_fail()
+    test_main_reports_crash_then_reraises()
     print(f"\n{_PASS} passed, {_FAIL} failed")
     return 1 if _FAIL else 0
 
