@@ -1,0 +1,8 @@
+[Unit]
+Description=linosbrain Slack bot weekly recycle (backstop against SDK-subprocess memory creep)
+After=linosbrain-slackbot.service
+
+[Service]
+Type=oneshot
+# Runs as root so it can act on the system slackbot unit.
+ExecStart=/usr/bin/systemctl try-restart linosbrain-slackbot.service

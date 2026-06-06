@@ -1,0 +1,12 @@
+[Unit]
+Description=brunoosbrain LinOS cleared-inbox push - daily 08:45 BRT
+
+[Timer]
+# Runs after BrunOS inbox reflection has had time to stamp captures terminal,
+# and before the LinOS consumer's planned 09:00 BRT run.
+OnCalendar=*-*-* 08:45 America/Sao_Paulo
+Persistent=true
+Unit=brunoosbrain-linos-inbox-sync.service
+
+[Install]
+WantedBy=timers.target

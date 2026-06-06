@@ -1,0 +1,24 @@
+[Unit]
+Description=linosbrain Slack chat bot (company brain Socket Mode)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+Restart=on-failure
+RestartSec=10
+User=linos
+Group=linos
+WorkingDirectory=/home/linos/claude-second-brain
+EnvironmentFile=/home/linos/claude-second-brain/.claude/.env
+Environment=TZ=America/Sao_Paulo
+Environment=PATH=/usr/local/bin:/usr/bin:/bin
+Environment=CHAT_BRAIN_PROFILE=linos
+Environment=CHAT_FLUSH_ENABLED=0
+ExecStart=/usr/local/bin/uv run python .claude/chat/bot.py
+LogsDirectory=linosbrain
+StandardOutput=append:/var/log/linosbrain/slackbot.log
+StandardError=append:/var/log/linosbrain/slackbot.log
+
+[Install]
+WantedBy=multi-user.target

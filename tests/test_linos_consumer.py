@@ -319,6 +319,21 @@ def test_idempotency() -> None:
               "idempotency: watermark past all captures → no acks")
 
 
+def test_joint_entry_filename_no_date_collision() -> None:
+    print("[test_joint_entry_filename_no_date_collision]")
+    if not _HAS_CONSUMER:
+        skip("test_joint_entry_filename_no_date_collision", "linos_consumer not importable")
+        return
+
+    now = datetime(2026, 6, 6, 17, 45, 0, tzinfo=BRT_OFFSET)
+    a = lc._joint_entry_filename("2026-05-19-182135-7de4c62e", now)
+    b = lc._joint_entry_filename("2026-05-19-182142-7de4c62e", now)
+
+    check(a != b, "two same-date captures produce distinct joint filenames")
+    check("2026-05-19-182135-7de4c62e" in a,
+          "filename keeps enough capture id for traceability")
+
+
 # ---------------------------------------------------------------------------
 # Run all
 # ---------------------------------------------------------------------------
@@ -332,6 +347,7 @@ if __name__ == "__main__":
     test_eligible_filters_uncleared()
     test_dry_run_no_writes()
     test_idempotency()
+    test_joint_entry_filename_no_date_collision()
 
     print()
     print(f"Results: {_PASS} passed, {_FAIL} failed, {_SKIP} skipped")

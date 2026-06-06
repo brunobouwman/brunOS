@@ -12,8 +12,8 @@ Memory discipline (the box is shared with Lisa, no swap):
   - LRU cap: at most `max_live_sessions` live clients at once; the
     least-recently-active is evicted when a new one pushes over the cap.
 
-Knowledge capture: before a client is closed (idle reap, LRU evict, or
-shutdown) the thread transcript is handed to `memory_flush.py` via
+Knowledge capture: when enabled, before a client is closed (idle reap, LRU
+evict, or shutdown) the thread transcript is handed to `memory_flush.py` via
 `dispatch_flush(source="chat-session")` — same pipeline the SessionEnd/PreCompact
 hooks use. memory_flush's 2KB-floor + FLUSH_OK gate keep trivial chatter out of
 the daily log; durable bullets get promoted to MEMORY.md by reflection.
@@ -56,12 +56,14 @@ class SessionManager:
         idle_reap_seconds: int = IDLE_REAP_SECONDS,
         max_live_sessions: int = MAX_LIVE_SESSIONS,
         reap_interval_seconds: int = REAP_INTERVAL_SECONDS,
+        flush_enabled: bool = True,
     ) -> None:
         self._options_factory = options_factory
         self._db_path = db_path
         self._idle_reap_seconds = idle_reap_seconds
         self._max_live_sessions = max_live_sessions
         self._reap_interval_seconds = reap_interval_seconds
+        self._flush_enabled = flush_enabled
         self._clients: dict[str, "ClaudeSDKClient"] = {}  # noqa: F821
         self._last_active: dict[str, float] = {}  # thread_key → monotonic ts
         self._session_ids: dict[str, str] = {}  # thread_key → SDK session_id
@@ -244,6 +246,9 @@ class SessionManager:
 
     def _flush_thread(self, thread_key: str) -> None:
         """Hand the thread transcript to memory_flush.py (fire-and-forget)."""
+        if not self._flush_enabled:
+            _log(f"[chat] transcript flush disabled for thread {thread_key}")
+            return
         session_id = self._session_ids.get(thread_key)
         if not session_id:
             return

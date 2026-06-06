@@ -440,7 +440,7 @@ def _integrate_one(
     # Write joint entry
     now_dt = now_brt()
     joint_dir.mkdir(parents=True, exist_ok=True)
-    entry_filename = f"{now_dt.strftime('%Y-%m-%d')}-{capture_id[:8]}.md"
+    entry_filename = _joint_entry_filename(capture_id, now_dt)
     entry_path = joint_dir / entry_filename
     ts = _ts_brt(now_dt)
     bullets_md = "\n".join(f"- {b}" for b in result["bullets"]) if result["bullets"] else "_No bullets extracted._"
@@ -486,6 +486,14 @@ def _integrate_one(
         return False
 
     return True
+
+
+def _joint_entry_filename(capture_id: str, now_dt) -> str:
+    """Stable, collision-free joint note name for a source capture."""
+    safe_capture = re.sub(r"[^A-Za-z0-9_.-]+", "-", capture_id).strip(".-")
+    if not safe_capture:
+        safe_capture = _hash(capture_id)[:12]
+    return f"{now_dt.strftime('%Y-%m-%d')}-{safe_capture}.md"
 
 
 # ---------------------------------------------------------------------------
