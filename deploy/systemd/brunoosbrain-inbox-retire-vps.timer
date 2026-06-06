@@ -1,0 +1,12 @@
+[Unit]
+Description=brunoosbrain VPS inbox retirement - daily F2
+
+[Timer]
+# Runs after BrunOS reflect (08:00+) + bruno->LinOS cleared push + LinOS consumer.
+# Keep disabled until the consumer/ack path is live; validate with dry-runs first.
+OnCalendar=*-*-* 10:30:00 America/Sao_Paulo
+Persistent=true
+Unit=brunoosbrain-inbox-retire-vps.service
+
+[Install]
+WantedBy=timers.target

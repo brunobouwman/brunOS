@@ -19,8 +19,13 @@ knowledge out.
 Safety: --update never overwrites a newer file on the VPS (so the VPS's
 strip-in-place + share_status:cleared rewrites survive the next push — their
 mtime is newer than the Mac original); NO --delete (a capture
-retired/cleared on the VPS is never resurrected or removed from the Mac side).
--a preserves mtimes, which --update depends on. Idempotent; safe to run often.
+retired/cleared on the VPS is never removed from the Mac side). -a preserves
+mtimes, which --update depends on. Idempotent; safe to run often.
+
+Resurrection guard: the VPS retirement job can publish an rsync exclude file
+(`BRUNOS_INBOX_EXCLUDE_FILE`) containing retired capture paths. When present,
+this sync passes it to rsync with --exclude-from so a stale Mac copy cannot
+recreate a VPS-deleted capture.
 """
 
 from __future__ import annotations
@@ -35,6 +40,7 @@ sys.path.insert(0, str(REPO / ".claude" / "scripts"))
 
 VPS_HOST = os.environ.get("VPS_HOST", "brunoos")
 REMOTE_INBOX = "/home/bruno/BrunOS/Memory/_inbox"
+EXCLUDE_FILE_ENV = "BRUNOS_INBOX_EXCLUDE_FILE"
 
 
 def _reporter():
@@ -74,6 +80,22 @@ def _vault_path() -> Path:
     return Path(v) if v else REPO / "BrunOS"
 
 
+def _rsync_cmd(src: Path, dest: str) -> list[str]:
+    cmd = ["rsync", "-az", "--update", "-e", "ssh"]
+    exclude = os.environ.get(EXCLUDE_FILE_ENV, "").strip()
+    if exclude:
+        p = Path(exclude).expanduser()
+        if p.is_file():
+            cmd += ["--exclude-from", str(p)]
+        else:
+            print(
+                f"==> {EXCLUDE_FILE_ENV}={p} is not readable; continuing without excludes",
+                file=sys.stderr,
+            )
+    cmd += [f"{src}/", dest]
+    return cmd
+
+
 def main() -> int:
     reporter = _reporter()
     src = _vault_path() / "Memory" / "_inbox"
@@ -93,9 +115,7 @@ def main() -> int:
                 msg=f"ssh mkdir on {VPS_HOST} failed: {type(e).__name__}: {e}")
         raise
     # trailing slash on src → push the contents of _inbox/ into the remote _inbox/.
-    r = subprocess.run(
-        ["rsync", "-az", "--update", "-e", "ssh", f"{src}/", dest],
-    )
+    r = subprocess.run(_rsync_cmd(src, dest))
     if r.returncode == 0:
         print(f"==> inbox sync done → {dest}")
         _report(reporter, ok=True)

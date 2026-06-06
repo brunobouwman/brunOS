@@ -174,6 +174,7 @@ healthchecks API). One check per service per host, named `<brain>-<svc>-<host>`.
 | memory-doctor | `BRUNOS_MEMORY_DOCTOR_HEALTHCHECK_URL` | daily 09:15 → 26 h | index + search canary |
 | inbox-rsync | `BRUNOS_INBOX_RSYNC_HEALTHCHECK_URL` | 2 min → 10 min | Mac-only |
 | linos-inbox-sync | `BRUNOS_LINOS_INBOX_SYNC_HEALTHCHECK_URL` | daily ≈08:45 → 26 h | VPS-only |
+| inbox-retire-vps | `BRUNOS_INBOX_RETIRE_VPS_HEALTHCHECK_URL` | daily 10:30 → 26 h | VPS-only; enable only after LinOS consumer/ack path is live |
 | inbox-retire | `BRUNOS_INBOX_RETIRE_HEALTHCHECK_URL` | daily 11:30 → 26 h | Mac-only; pings in dry-run too |
 | linos-consumer | `LINOS_CONSUMER_HEALTHCHECK_URL` | daily 09:00 → 26 h | LinOS node only |
 
@@ -324,13 +325,29 @@ ssh brunoos 'systemctl list-timers linosbrain-* --no-pager'
 ssh brunoos 'tail -f /var/log/linosbrain/consumer.log'
 ```
 
-### Ack manifest role
+### F2 retirement
 
 Each ack at `/home/linos/LinOS/Memory/_acks/brunos/<capture_id>.json` signals
-to BrunOS that LinOS has processed the capture. The future **F2 retirement job**
-(deferred, out of scope here) will read these acks to delete BrunOS captures
-where both `(BrunOS watermark passed)` AND `(LinOS ack present)`, falling back
-to a 15-day hard-delete for captures without an ack.
+to BrunOS that LinOS has processed the capture. The VPS-side F2 job
+(`deploy/bin/retire_vps_inbox.py`) deletes a BrunOS inbox capture once BrunOS
+has processed it (`share_status: cleared`) and any destination consumer has
+acked it. For LinOS-bound captures without an ack, it falls back after 15 days
+only if the ack directory exists, proving the consumer side is deployed.
+`active` and `quarantined` captures are never deleted by this job.
+
+The timer ships installed-ready as `brunoosbrain-inbox-retire-vps.{service,timer}`,
+but should only be enabled after the cleared push and LinOS consumer are live:
+
+```bash
+ssh brunoos 'cd /home/bruno/claude-second-brain && /usr/local/bin/uv run python deploy/bin/retire_vps_inbox.py'
+ssh brunoos 'sudo systemctl enable --now brunoosbrain-inbox-retire-vps.timer'
+```
+
+Every applied deletion is recorded in `.claude/data/state/retired_inbox.json`
+and mirrored to `.claude/data/state/inbox-retired-excludes.txt` for
+`sync_inbox.py`'s optional `BRUNOS_INBOX_EXCLUDE_FILE` resurrection guard. The
+primary guard remains the Mac-side `retire_local_inbox.py`, which deletes the
+producer copy once the VPS has the capture in a terminal state.
 
 ## Quick smoke tests
 

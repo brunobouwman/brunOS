@@ -1,0 +1,32 @@
+# VPS-side inbox retirement (federation F2): delete a BrunOS inbox capture once
+# processed (share_status: cleared) AND LinOS-acked, ELSE a 15-day fallback.
+# Counterpart to the Mac-side com.bruno.brunos.inbox-retire (which prunes the
+# Mac's local copies); this prunes the VPS copies once both brains have consumed
+# them. Resurrection guard via deploy/bin/retire_vps_inbox.py's ledger +
+# inbox-retired-excludes.txt (+ the Mac self-prune running earlier in the day).
+#
+# !! DO NOT `systemctl enable --now` THE TIMER UNTIL THE LinOS CONSUMER IS LIVE
+#    AND ACKING (Phase C.5). The script fails closed when the ack dir is absent,
+#    but the timer should still be enabled only after live dry-runs look sane.
+#    Install the unit now, but validate with dry-runs first:
+#      uv run python deploy/bin/retire_vps_inbox.py            # dry-run
+#      systemctl enable --now brunoosbrain-inbox-retire-vps.timer   # only after C.5
+[Unit]
+Description=brunoosbrain VPS inbox retirement — processed+acked else 15-day fallback (F2)
+After=network-online.target
+Wants=network-online.target
+OnFailure=brunoosbrain-alert@%n.service
+
+[Service]
+Type=oneshot
+User=bruno
+Group=bruno
+WorkingDirectory=/home/bruno/claude-second-brain
+EnvironmentFile=/home/bruno/claude-second-brain/.claude/.env
+Environment=TZ=America/Sao_Paulo
+Environment=PATH=/usr/local/bin:/usr/bin:/bin
+ExecStart=/usr/local/bin/uv run python deploy/bin/retire_vps_inbox.py --apply
+TimeoutStartSec=300
+LogsDirectory=brunoosbrain
+StandardOutput=append:/var/log/brunoosbrain/inbox-retire-vps.log
+StandardError=append:/var/log/brunoosbrain/inbox-retire-vps.log
