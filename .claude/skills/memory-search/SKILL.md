@@ -1,6 +1,6 @@
 ---
 name: memory-search
-description: Hybrid memory-search skill for BrunOS's RAG over BrunOS/Memory/. Use whenever Bruno asks to search, recall, find, dedupe, or match the tone of anything in the vault — daily logs, drafts, projects, clients, goals, content, team, research, news-digest, meetings, personal — or asks "did I", "have I", "when did I", "what did I write about", "is there a prior", "similar to", "tone match", "voice corpus", or runs memory_search.py / memory_index.py directly. Teaches the canonical CLI invocation, asymmetric BGE query phrasing (short natural-language sentences, not keyword soup), the folder→--path-prefix cheat sheet, RRF score interpretation (ordinal, not absolute), the read-after-search workflow (chunks are 400-token slices — Read the file_path of high-RRF hits for full context), the FTS5 operator escape hatch (+required / -excluded / "exact phrase" / prefix*), the no-date-filter limit, the personal/finance.md exclusion, and a fallback ladder when results look thin or stale. Pairs with the brunos-vault skill (folder semantics) — this one is for retrieval-by-meaning.
+description: Hybrid memory-search skill for BrunOS's RAG over BrunOS/Memory/. Use whenever Bruno asks to search, recall, find, dedupe, or match the tone of anything in the vault — daily logs, drafts, projects, clients, goals, content, team, research, news-digest, meetings, personal — or asks "did I", "have I", "when did I", "what did I write about", "is there a prior", "similar to", "tone match", "voice corpus", or runs memory_search.py / memory_index.py directly. Teaches the canonical CLI invocation, asymmetric BGE query phrasing (short natural-language sentences, not keyword soup), the folder→--path-prefix cheat sheet, RRF score interpretation (ordinal, not absolute), the read-after-search workflow (chunks are 400-token slices — Read the file_path of high-RRF hits for full context), the FTS5 operator escape hatch (+required / -excluded / "exact phrase" / prefix*), the no-date-filter limit, the personal/finance.md exclusion, the pending personal buffer (today's extracted-but-not-yet-curated items, auto-appended to unscoped results so intraday knowledge is recallable before nightly curation), and a fallback ladder when results look thin or stale. Pairs with the brunos-vault skill (folder semantics) — this one is for retrieval-by-meaning.
 ---
 
 # Memory Search Skill
@@ -32,6 +32,16 @@ In-process Python API for scripted callers: `from memory_search import search; s
 | Question about meaning ("what did I think about X", "tone match Y", "have I covered Z") | `memory_search.py` |
 
 For folder semantics, frontmatter spec, language routing, and boundaries, defer to the `brunos-vault` skill — that one teaches *where* things live; this one teaches *how to retrieve them by meaning*.
+
+## Pending personal buffer (today's not-yet-curated items)
+
+The hourly reflection inbox pass extracts durable personal items but **buffers** them in `.claude/data/state/personal_pending.json` until the daily curation pass folds them into `MEMORY.md`. Those items aren't in the vault or the index yet — without this, a fact learned at 09:00 would be unrecallable until tomorrow's curation + reindex.
+
+- **Unscoped searches include them automatically.** Up to 3 lexical buffer matches are *appended* to the results, each tagged `"pending": true` with `file_path: ".claude/data/state/personal_pending.json"`. Treat them as fresh, low-friction memory — already extracted, just not yet promoted. Their `score` is query/item token-overlap (0–1), **not** comparable to RRF; they're a supplement after the ranked vault hits, so don't read a high pending score as "more relevant than the vault hits."
+- **Scoped searches skip them.** `--path-prefix <folder>` never returns buffer rows (and neither do dedup callers like news-digest / dreaming, which always scope) — a folder-scoped search is asking about the vault, not the buffer.
+- **Read the whole buffer directly** when you want today's full set, not just query matches: `Read .claude/data/state/personal_pending.json`. It's drained + cleared each day by the curation pass, so it only ever holds *today's* extractions.
+- The same items are also injected into every session's loaded context (the `pending-personal` block, right after MEMORY.md), so you usually already have them — search is for when you need to *retrieve* a specific one mid-task.
+- Disable with `--no-pending` / `BRUNOS_SEARCH_NO_PENDING=1`.
 
 ## Query phrasing for asymmetric BGE
 

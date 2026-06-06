@@ -1,15 +1,26 @@
-"""Daily reflection: distil yesterday's daily log into MEMORY.md.
+"""Reflection: three co-scheduled, independently-idempotent stages.
 
-Single Sonnet 4.6 call (no tools, no skills) → JSON [{type, text, promote}] →
-deterministic Python applies promotions. If MEMORY.md > 8KB after append, a
-SECOND Sonnet call compacts older entries before re-writing.
+  1. daily-log distill — one Sonnet 4.6 call over yesterday's daily log →
+     JSON [{type, text, promote}] → promotions BUFFERED (not written) for curation.
+  2. inbox pass — per-project session-capture drain (one Sonnet call/project):
+     personal items → buffer, continuity → projects/<slug>.md, captures
+     stripped + share_status:cleared in place (federation write-side).
+  3. memory curation — drain the personal buffer into MEMORY.md ONCE, then
+     EVICT-TO-ARCHIVE once (deterministic, lossless: oldest dated bullets move to
+     Memory/_archive/MEMORY-archive.md). This is the sole MEMORY.md write path, so
+     the doc's byte size is stable across the day and durable items are never
+     silently squeezed.
+
+Behavior + which stages run come from brain-config.json (brain_config.get),
+defaulting to all-on when the file is absent. Cadence (hourly inbox / daily
+curate) is owned by the timer units gen_schedules.py emits — not by this script.
 
 CLAUDE_INVOKED_BY=reflection — the protect-soul.py PreToolUse hook keys off
 this value to block any SOUL.md edits (belt-and-suspenders; reflection itself
 uses no tools today).
 
-Idempotent via .claude/data/state/last_reflection.json (records the last
-YYYY-MM-DD already processed).
+Idempotent via .claude/data/state/{last_reflection,inbox_reflection,
+personal_pending}.json.
 """
 
 from __future__ import annotations
@@ -30,6 +41,7 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(REPO_ROOT / ".claude" / "scripts"))
 
 from shared import (  # noqa: E402
+    PERSONAL_PENDING_PATH,
     STATE_DIR,
     _FM_RE,
     _slug,
@@ -53,6 +65,7 @@ from sanitize import (  # noqa: E402
     scrub_secrets,
 )
 from sync_common import SyncReporter  # noqa: E402
+import brain_config  # noqa: E402
 
 load_env()
 
@@ -62,8 +75,9 @@ MEMORY_REL = "Memory/MEMORY.md"
 # 5120 until 2026-06-05: the cap bound on nearly every run once daily lessons
 # accelerated, so each run burned a compaction call and risked lossy squeezes of
 # durable items (first armed monitoring run alerted memory_over_cap twice).
-# Raised to match PROJECT_DOC_CAP_BYTES. Structural fix (compact once per run +
-# evict-to-archive instead of delete) is deferred to the dream PR.
+# Raised to match PROJECT_DOC_CAP_BYTES (PR #14). The structural fix landed in
+# Phase B: MEMORY.md is written once per day by the curation stage, and over-cap
+# bullets are EVICTED to _archive/ (lossless) instead of LLM-squeezed.
 MEMORY_HARD_CAP_BYTES = 8192
 # Compaction sanity floor: abort apply only if the compacted body is below this
 # fraction of the CAP (not of the original) — catches a nuked/garbage LLM return
@@ -78,6 +92,17 @@ COMPACTION_FLOOR_RATIO = 0.25  # floor = max(512, cap_bytes * this)
 # in place. State + caps for that stage:
 INBOX_WATERMARK_PATH = STATE_DIR / "inbox_reflection.json"  # {"<slug>": "<last created iso>"}
 PROJECT_DOC_CAP_BYTES = 8192  # cap for projects/<slug>.md before compaction
+
+# Phase B: the hourly inbox pass buffers personal items in PERSONAL_PENDING_PATH
+# (canonical path + readers in shared, so context + search can surface it intraday)
+# instead of churning MEMORY.md per batch; the daily memory-curation stage drains
+# the buffer + the daily-log promotions, writes MEMORY.md ONCE, then evicts ONCE.
+MEMORY_ARCHIVE_REL = "Memory/_archive/MEMORY-archive.md"     # evicted durable items (lossless)
+MEMORY_ARCHIVE_SECTION = "## Evicted from MEMORY.md"
+# A dated MEMORY.md bullet: "- **YYYY-MM-DD** — ...". Only these are evictable
+# (undated context bullets like links/aliases stay — eviction stays lossless and
+# order-stable).
+_DATED_BULLET_RE = re.compile(r"^- \*\*(\d{4}-\d{2}-\d{2})\*\*")
 CONTINUITY_HEADER = "## Auto-consolidated continuity"
 PERSONAL_ITEMS_CAP = 8  # max personal promotions accepted per project / run
 INBOX_CAPTURES_PER_BATCH = 8  # captures per Sonnet call; watermark advances per batch
@@ -496,6 +521,160 @@ def _compact_if_over_cap(
     return result, still_over
 
 
+# --- Phase B: personal-item buffer + deterministic evict-to-archive -----------
+
+
+def _buffer_personal(items: list[dict], source: str) -> int:
+    """Append promotable personal items to the pending buffer (drained by curation).
+
+    The hourly inbox pass and the daily-log distill BOTH call this instead of
+    writing MEMORY.md directly — so MEMORY.md is written/compacted at most once per
+    day (the curation stage), not once per inbox batch. Only items whose `type`
+    maps to a MEMORY.md section are kept (others would be dropped at append time;
+    filtering here keeps the buffer-drain lossless). Returns the count buffered.
+    Lock-guarded so concurrent hourly runs append cleanly.
+    """
+    appendable = [
+        {
+            "type": it.get("type", ""),
+            "text": it["text"].rstrip(),
+            "source": source,
+            "ts": _ts_brt(),
+        }
+        for it in items
+        if it.get("text") and it.get("type") in SECTION_HEADERS
+    ]
+    if not appendable:
+        return 0
+    with file_lock(PERSONAL_PENDING_PATH):
+        buf = load_state(PERSONAL_PENDING_PATH, default=[])
+        if not isinstance(buf, list):
+            buf = []
+        buf.extend(appendable)
+        save_state(PERSONAL_PENDING_PATH, buf)
+    return len(appendable)
+
+
+def _new_memory_archive() -> str:
+    ts = _ts_brt()
+    return (
+        "---\n"
+        "type: reference\n"
+        f"created: {ts}\n"
+        f"updated: {ts}\n"
+        "tags:\n"
+        "  - archive\n"
+        "  - memory\n"
+        "status: active\n"
+        "---\n\n"
+        "# MEMORY.md archive\n\n"
+        f"{MEMORY_ARCHIVE_SECTION}\n"
+    )
+
+
+def _evict_one_oldest_dated_bullet(body: str) -> tuple[str, str, str] | None:
+    """Peel the OLDEST dated bullet from the LARGEST section of `body`.
+
+    Returns (new_body, section_heading, bullet_line), or None when no dated bullet
+    exists anywhere (nothing can be evicted losslessly). Single-line bullets — the
+    MEMORY.md convention. "Largest section" is by byte size; ties on bullet date
+    break by earliest position.
+    """
+    lines = body.split("\n")
+    sec_idx = -1
+    headings: list[str] = []
+    sizes: list[int] = []
+    line_section: list[int] = []
+    for ln in lines:
+        if ln.startswith("## "):
+            sec_idx += 1
+            headings.append(ln)
+            sizes.append(0)
+        elif sec_idx == -1:  # preamble before the first heading
+            sec_idx = 0
+            headings.append("")
+            sizes.append(0)
+        line_section.append(sec_idx)
+        sizes[sec_idx] += len(ln.encode("utf-8")) + 1
+
+    dated: list[tuple[str, int, int]] = []  # (date, line_index, section_index)
+    for i, ln in enumerate(lines):
+        m = _DATED_BULLET_RE.match(ln)
+        if m:
+            dated.append((m.group(1), i, line_section[i]))
+    if not dated:
+        return None
+
+    secs_with = {s for _, _, s in dated}
+    target_sec = max(secs_with, key=lambda s: sizes[s])
+    cand = sorted(
+        ((d, i) for d, i, s in dated if s == target_sec),
+        key=lambda t: (t[0], t[1]),
+    )
+    _, victim = cand[0]
+    bullet = lines[victim]
+    heading = headings[line_section[victim]].lstrip("# ").strip() or "(top)"
+    new_body = "\n".join(lines[:victim] + lines[victim + 1:])
+    return new_body, heading, bullet
+
+
+def _append_to_memory_archive(evicted: list[tuple[str, str]]) -> None:
+    """Append evicted bullets verbatim to Memory/_archive/MEMORY-archive.md.
+
+    Lossless: the original bullet (with its date + text) is preserved; a provenance
+    suffix records the source section and eviction date. Lock + atomic.
+    """
+    path = vault_path() / MEMORY_ARCHIVE_REL
+    today = now_brt().strftime("%Y-%m-%d")
+    block = [
+        f"{bullet.rstrip()}  _(from: {heading}; evicted {today})_"
+        for heading, bullet in evicted
+    ]
+    with file_lock(path):
+        existing = _read_text(path) if path.exists() else _new_memory_archive()
+        if MEMORY_ARCHIVE_SECTION not in existing:
+            existing = existing.rstrip() + f"\n\n{MEMORY_ARCHIVE_SECTION}\n"
+        if not existing.endswith("\n"):
+            existing += "\n"
+        atomic_write(path, existing + "\n".join(block) + "\n")
+
+
+def _evict_to_archive_if_over_cap(
+    memory_text: str,
+    cap_bytes: int = MEMORY_HARD_CAP_BYTES,
+    *,
+    dry_run: bool = False,
+) -> tuple[str, list[tuple[str, str]], bool]:
+    """Deterministic, zero-LLM, lossless cap guard for MEMORY.md.
+
+    While over cap, peel the oldest dated bullet from the largest section and move
+    it to the archive. Returns (new_text, evicted, still_over_cap) where evicted is
+    the list of (section_heading, bullet) actually moved. `still_over_cap` is True
+    only if the doc is STILL over cap after running out of dated bullets to peel
+    (surfaced to monitoring). In dry-run, computes the result + would-evict list
+    but writes nothing to the archive.
+
+    Replaces the LLM squeeze as MEMORY.md's primary cap mechanism: lossless (items
+    move, never vanish) and cheap (no model call). `_compact_if_over_cap` stays as
+    the project-doc compactor + an optional secondary merge pass (off by default).
+    """
+    if len(memory_text.encode("utf-8")) <= cap_bytes:
+        return memory_text, [], False
+    fm, body = _split_memory(memory_text)
+    evicted: list[tuple[str, str]] = []
+    while len((fm + body).encode("utf-8")) > cap_bytes:
+        res = _evict_one_oldest_dated_bullet(body)
+        if res is None:
+            break  # no dated bullets left — can't evict losslessly
+        body, heading, bullet = res
+        evicted.append((heading, bullet))
+    new_text = fm + body
+    still_over = len(new_text.encode("utf-8")) > cap_bytes
+    if evicted and not dry_run:
+        _append_to_memory_archive(evicted)
+    return new_text, evicted, still_over
+
+
 def _new_project_doc(slug: str) -> str:
     """Frontmatter + heading for a fresh projects/<slug>.md (create-if-absent)."""
     ts = _ts_brt()
@@ -785,7 +964,7 @@ def _run_inbox_stage(
     """Drain per-project session inboxes: one Sonnet call per project, three outputs.
 
     For each project with captures newer than its watermark and not yet cleared:
-      1. personal items → MEMORY.md (via _append_promotions, cap-guarded)
+      1. personal items → personal_pending.json buffer (drained daily by curation)
       2. continuity bullets → projects/<slug>.md (## Auto-consolidated continuity)
       3. each capture rewritten in place with personal asides stripped +
          share_status: cleared (never deleted/moved)
@@ -872,7 +1051,7 @@ def _process_inbox_batch(
       failure, OR when a still-open capture remains (advancing into newer batches
       would skip it). The caller breaks but keeps whatever watermark was returned.
     - fails: GENUINE soft-failure kinds for monitoring (call_failed, json_parse,
-      memory_over_cap, continuity_over_cap, quarantined). A benign still-open hold
+      continuity_over_cap, quarantined). A benign still-open hold
       is conveyed ONLY by `stop`, never as a fail — so the monitor never alerts on
       a normal retry cycle.
     """
@@ -916,32 +1095,43 @@ def _process_inbox_batch(
     if dry_run:
         sys.stdout.write(json.dumps({
             "project": slug,
-            "personal": personal,
+            "personal_to_buffer": personal,  # routed to personal_pending.json, NOT MEMORY.md
             "continuity": continuity,
             "would_clear": [c["capture"] for c in matched_cleaned],
         }, indent=2, ensure_ascii=False))
         sys.stdout.write("\n")
-        _log(f"  inbox[{label}]: dry-run; no writes, watermark unchanged")
+        _log(f"  inbox[{label}]: dry-run; personal → buffer (not MEMORY), no writes")
         return None, False, []
 
-    # 1) Personal → MEMORY.md (decision/lesson/fact/status only; cap-guarded).
-    mem_over_cap = False
+    # 1) Personal → pending buffer (decision/lesson/fact/status only). NO MEMORY.md
+    #    write here: the hourly inbox pass must not churn/compact MEMORY.md per
+    #    batch. The daily curation stage drains the buffer + evicts ONCE.
     appendable = [
         p for p in personal
         if p.get("promote") and p.get("type") != "soul-suggestion"
     ]
     if appendable:
-        mem = _read_text(memory_path)
-        new_mem = _append_promotions(mem, appendable)
-        new_mem, mem_over_cap = _compact_if_over_cap(new_mem)
-        with file_lock(memory_path):
-            atomic_write(memory_path, new_mem)
-        _log(f"  inbox[{label}]: appended {len(appendable)} personal item(s) to MEMORY.md")
+        n = _buffer_personal(appendable, slug)
+        _log(f"  inbox[{label}]: buffered {n} personal item(s) for daily curation")
 
     # 2) Continuity → projects/<slug>.md.
     cont_over_cap = False
     if continuity:
         cont_over_cap = _append_continuity(slug, continuity)
+
+    # Federation off (solo brain): extract personal + continuity but do NOT
+    # strip/clear/forward. Advance the watermark over the whole batch so captures
+    # aren't reprocessed (there is no consumer gate to satisfy).
+    if brain_config.get("reflection.federation") is False:
+        newest: str | None = None
+        for p in captures:
+            entry = by_name.get(p.name)
+            created = entry[1].get("created") if entry else None
+            if created and (newest is None or created > newest):
+                newest = created
+        _log(f"  inbox[{label}]: federation off — extracted only, watermark → {newest}")
+        fails: list[str] = ["continuity_over_cap"] if cont_over_cap else []
+        return newest, False, fails
 
     # 3) Strip-in-place per echoed capture; bump/quarantine the rest. The watermark
     #    must NOT advance past a still-open capture (the under-clearing bug: an
@@ -970,9 +1160,7 @@ def _process_inbox_batch(
     # A still-open capture is a benign hold (NOT a failure): the watermark stays
     # put and we retry next run. Only genuine problems go into `fails` so the
     # monitor doesn't alert on normal retry cycles.
-    fails: list[str] = []
-    if mem_over_cap:
-        fails.append("memory_over_cap")
+    fails = []
     if cont_over_cap:
         fails.append("continuity_over_cap")
     if counts["quarantined"]:
@@ -981,9 +1169,12 @@ def _process_inbox_batch(
 
 
 def _run_daily_stage(dry_run: bool) -> tuple[int, list[str]]:
-    """Returns (rc, fails) — rc!=0 is a hard failure; `fails` holds soft-failure
-    kinds (daily_call_failed, daily_json_parse, daily_memory_over_cap) for the
-    monitor. A clean no-op skip returns (0, [])."""
+    """Distil yesterday's daily log into promotions and BUFFER them for curation.
+
+    Returns (rc, fails) — rc!=0 is a hard failure; `fails` holds soft-failure
+    kinds (daily_call_failed, daily_json_parse) for the monitor. The MEMORY.md
+    write + cap-guard now happen once, in the curation stage. A clean no-op skip
+    returns (0, [])."""
     _log(f"reflection (daily-log stage) start ({_ts_brt()})")
     now_dt = now_brt()
     yesterday_str = _yesterday_str(now_dt)
@@ -1034,33 +1225,84 @@ def _run_daily_stage(dry_run: bool) -> tuple[int, list[str]]:
         _log("  dry-run; no vault writes, no state update")
         return 0, []
 
-    fails: list[str] = []
     if promoted:
         # 1) SOUL suggestions go to today's daily log.
         _surface_soul_suggestions(promoted)
-        # 2) Append non-soul promotions to MEMORY.md.
+        # 2) Buffer non-soul promotions for the daily curation stage (single
+        #    MEMORY.md write + evict per day — no per-run compaction here).
         appendable = [p for p in promoted if p.get("type") != "soul-suggestion"]
         if appendable:
-            new_memory = _append_promotions(memory_text, appendable)
-            new_memory, mem_over_cap = _compact_if_over_cap(new_memory)
-            if mem_over_cap:
-                fails.append("daily_memory_over_cap")
-            with file_lock(memory_path):
-                atomic_write(memory_path, new_memory)
-            _log(
-                f"  wrote MEMORY.md ({len(new_memory.encode('utf-8'))}B; "
-                f"appended {len(appendable)} items)"
-            )
+            n = _buffer_personal(appendable, "daily-log")
+            _log(f"  buffered {n} daily promotion(s) for curation")
 
     _record_done(yesterday_str)
     _log(f"daily-log stage done; recorded last={yesterday_str}")
-    return 0, fails
+    return 0, []
+
+
+def _run_memory_curation_stage(dry_run: bool) -> tuple[int, list[str]]:
+    """Drain the personal buffer into MEMORY.md ONCE, then evict-to-archive ONCE.
+
+    This is the SOLE MEMORY.md write path now — the hourly inbox pass and the
+    daily-log distill only buffer (personal_pending.json). Draining + the
+    deterministic, lossless eviction here mean MEMORY.md's byte size is stable
+    across the day (no per-batch churn) and durable items are never silently
+    squeezed: over-cap bullets move to Memory/_archive/MEMORY-archive.md.
+
+    Returns (rc, fails); fails ⊆ {curate_memory_over_cap}. The buffer is cleared
+    only after a successful (non-dry) write.
+    """
+    if brain_config.get("reflection.memory_curation.enabled") is False:
+        _log("  memory-curation stage disabled by brain-config; skipping")
+        return 0, []
+    _log(f"reflection (memory-curation stage) start ({_ts_brt()})")
+
+    buf = load_state(PERSONAL_PENDING_PATH, default=[])
+    if not isinstance(buf, list):
+        buf = []
+    appendable = [
+        {"type": it.get("type", ""), "text": it.get("text", "")}
+        for it in buf
+        if it.get("text")
+    ]
+
+    memory_path = vault_path() / MEMORY_REL
+    memory_text = _read_text(memory_path)
+    new_mem = _append_promotions(memory_text, appendable) if appendable else memory_text
+    new_mem, evicted, over_cap = _evict_to_archive_if_over_cap(new_mem, dry_run=dry_run)
+
+    if dry_run:
+        sys.stdout.write(json.dumps({
+            "buffered_items": len(appendable),
+            "would_evict": [f"[{h}] {b}" for h, b in evicted],
+            "still_over_cap": over_cap,
+        }, indent=2, ensure_ascii=False))
+        sys.stdout.write("\n")
+        _log(f"  curation dry-run: {len(appendable)} buffered, "
+             f"{len(evicted)} would-evict; no writes")
+        return 0, []
+
+    if appendable or evicted:
+        with file_lock(memory_path):
+            atomic_write(memory_path, new_mem)
+        _log(
+            f"  curation: appended {len(appendable)} item(s), evicted {len(evicted)} "
+            f"to archive; MEMORY.md now {len(new_mem.encode('utf-8'))}B"
+        )
+    else:
+        _log("  curation: buffer empty + MEMORY.md under cap; no-op")
+
+    if buf:  # drain only after a successful write (atomic_write raises → buffer kept)
+        save_state(PERSONAL_PENDING_PATH, [])
+
+    return 0, (["curate_memory_over_cap"] if over_cap else [])
 
 
 def _emit_verdict(
     rc: int,
     daily_fails: list[str],
     inbox_failures: list[tuple[str, str]],
+    curate_fails: list[str],
 ) -> None:
     """Record a single success/failure verdict covering BOTH stages.
 
@@ -1070,7 +1312,7 @@ def _emit_verdict(
     """
     state = REFLECT_REPORTER.load()
     attempt_ts = _ts_brt()
-    all_kinds = list(daily_fails) + [k for _, k in inbox_failures]
+    all_kinds = list(daily_fails) + [k for _, k in inbox_failures] + list(curate_fails)
     if not rc and not all_kinds:
         REFLECT_REPORTER.record_success(state, attempt_ts)
         return
@@ -1085,6 +1327,8 @@ def _emit_verdict(
         parts.append(
             "inbox: " + ", ".join(f"{s}[{k}]" for s, k in inbox_failures)
         )
+    if curate_fails:
+        parts.append(f"curate: {', '.join(curate_fails)}")
     REFLECT_REPORTER.record_failure(
         state, attempt_ts, kind=kind, msg="; ".join(parts), paths=paths
     )
@@ -1095,25 +1339,30 @@ def _run(
     *,
     do_daily: bool = True,
     do_inbox: bool = True,
+    do_curate: bool = True,
     only_project: str | None = None,
 ) -> int:
-    """Orchestrate the two reflection stages.
+    """Orchestrate the three reflection stages: daily-log distill → inbox → curate.
 
-    The daily-log stage and the inbox stage are independent and idempotent via
-    separate state files (last_reflection.json vs inbox_reflection.json), so the
-    inbox stage runs even when the daily stage short-circuits (no log / already
-    reflected). An inbox-stage crash never aborts an already-completed daily stage.
+    Each stage is independent and idempotent via its own state (last_reflection
+    .json / inbox_reflection.json / personal_pending.json), so a later stage runs
+    even when an earlier one short-circuits, and a crash in one never aborts an
+    already-completed earlier stage. Order matters: daily + inbox BUFFER personal
+    items; curation drains the buffer into MEMORY.md once and evicts once — so it
+    runs last.
 
-    A monitoring verdict is emitted ONLY on the full scheduled run (both stages,
-    no --project filter, not --dry-run) — partial/manual runs don't touch the
-    dead-man's-switch.
+    Behavior toggles come from brain-config.json (inbox_pass / memory_curation
+    enabled). A monitoring verdict is emitted ONLY on the full scheduled run (all
+    stages, no --project filter, not --dry-run).
     """
     rc = 0
     daily_fails: list[str] = []
     inbox_failures: list[tuple[str, str]] = []
+    curate_fails: list[str] = []
     if do_daily:
         rc, daily_fails = _run_daily_stage(dry_run)
-    if do_inbox:
+    inbox_enabled = brain_config.get("reflection.inbox_pass.enabled") is not False
+    if do_inbox and inbox_enabled:
         _log(f"reflection (inbox stage) start ({_ts_brt()})")
         try:
             inbox_failures = _run_inbox_stage(dry_run, only_project=only_project)
@@ -1123,22 +1372,39 @@ def _run(
             inbox_failures.append(("(inbox-stage)", f"crashed:{type(e).__name__}"))
         else:
             _log("inbox stage done")
+    elif do_inbox:
+        _log("  inbox-pass stage disabled by brain-config; skipping")
+    if do_curate:
+        crc, curate_fails = _run_memory_curation_stage(dry_run)
+        rc = rc or crc
 
-    is_full_run = do_daily and do_inbox and only_project is None and not dry_run
+    is_full_run = (
+        do_daily and do_inbox and do_curate and only_project is None and not dry_run
+    )
     if is_full_run:
-        _emit_verdict(rc, daily_fails, inbox_failures)
+        _emit_verdict(rc, daily_fails, inbox_failures, curate_fails)
     return rc
 
 
 def main(argv: list[str]) -> int:
-    parser = argparse.ArgumentParser(description="Daily MEMORY.md reflection + inbox drain")
+    parser = argparse.ArgumentParser(description="Reflection: daily-log distill + inbox drain + memory curation")
     parser.add_argument("--dry-run", action="store_true", help="print parsed JSON; skip vault writes and state update")
-    parser.add_argument("--inbox-only", action="store_true", help="run only the per-project inbox stage")
-    parser.add_argument("--skip-inbox", action="store_true", help="run only the daily-log stage (legacy behaviour)")
+    stages = parser.add_mutually_exclusive_group()
+    stages.add_argument("--inbox-only", action="store_true", help="run only the per-project inbox pass (hourly unit)")
+    stages.add_argument("--curate-only", action="store_true", help="run only the memory-curation stage (drain buffer → MEMORY.md → evict)")
+    stages.add_argument("--skip-inbox", action="store_true", help="run daily-log distill + curation, no inbox pass (curate unit)")
     parser.add_argument("--project", default=None, help="limit the inbox stage to one project slug")
     args = parser.parse_args(argv[1:])
-    if args.inbox_only and args.skip_inbox:
-        parser.error("--inbox-only and --skip-inbox are mutually exclusive")
+
+    # Stage selection. Default (no flag) runs all three: daily → inbox → curate.
+    if args.inbox_only:
+        do_daily, do_inbox, do_curate = False, True, False
+    elif args.curate_only:
+        do_daily, do_inbox, do_curate = False, False, True
+    elif args.skip_inbox:
+        do_daily, do_inbox, do_curate = True, False, True
+    else:
+        do_daily, do_inbox, do_curate = True, True, True
 
     # Run-lock guards the in-place mutation path (inbox strip/clear + MEMORY.md
     # writes); a manual run during the 08:00 timer skips rather than racing.
@@ -1149,8 +1415,9 @@ def main(argv: list[str]) -> int:
     try:
         return _run(
             dry_run=args.dry_run,
-            do_daily=not args.inbox_only,
-            do_inbox=not args.skip_inbox,
+            do_daily=do_daily,
+            do_inbox=do_inbox,
+            do_curate=do_curate,
             only_project=args.project,
         )
     finally:

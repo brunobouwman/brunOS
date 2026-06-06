@@ -1,0 +1,19 @@
+[Unit]
+Description=brunoosbrain memory curation (daily-log distill + buffer drain + evict)
+After=network-online.target
+Wants=network-online.target
+OnFailure=brunoosbrain-alert@%n.service
+
+[Service]
+Type=oneshot
+User=bruno
+Group=bruno
+WorkingDirectory=/home/bruno/claude-second-brain
+EnvironmentFile=/home/bruno/claude-second-brain/.claude/.env
+Environment=TZ=America/Sao_Paulo
+Environment=PATH=/usr/local/bin:/usr/bin:/bin
+ExecStart=/usr/local/bin/uv run python .claude/scripts/memory_reflect.py --skip-inbox
+TimeoutStartSec=600
+LogsDirectory=brunoosbrain
+StandardOutput=append:/var/log/brunoosbrain/reflect-curate.log
+StandardError=append:/var/log/brunoosbrain/reflect-curate.log

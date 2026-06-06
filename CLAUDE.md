@@ -18,7 +18,10 @@ Phase 4 moved the env file from repo-root `.env` to `.claude/.env`. `shared.load
 
 - `Memory/SOUL.md` — agent identity (write-protected from reflection per Phase 6).
 - `Memory/USER.md` — Bruno's profile.
-- `Memory/MEMORY.md` — durable memory, ≤8KB hard cap, growth via reflection only.
+- `Memory/MEMORY.md` — durable memory, ≤8KB hard cap, growth via reflection's daily curation only; over-cap bullets evict (lossless) to `_archive/MEMORY-archive.md`.
+- `Memory/_archive/MEMORY-archive.md` — durable items evicted from MEMORY.md (oldest-first, searchable; eviction is move-not-delete).
+- `Memory/playbook/` — dreaming output: reusable processes/patterns/prompts + decisions (`category: process|pattern|prompt|decision`); see `playbook/_README.md`.
+- `Memory/Brain/brain-config.template.json` — per-brain cadence + behavior template (copy to `.claude/data/state/brain-config.json` to override defaults).
 - `Memory/HEARTBEAT.md` — what to monitor each tick.
 - `Memory/HABITS.md` — 5 daily pillars.
 - `Memory/sources_of_truth.md` — ClickUp ↔ Obsidian convention reference.
@@ -121,7 +124,16 @@ uv run python .claude/skills/weekly-review/scripts/aggregate_week.py [--week YYY
 
 # Heartbeat + reflection (Phase 6) — manual CLI; Phase 9 wires the scheduler:
 uv run python .claude/scripts/heartbeat.py [--dry-run] [--no-agent] [--force]
-uv run python .claude/scripts/memory_reflect.py [--dry-run] [--inbox-only] [--skip-inbox] [--project <slug>]
+# Reflection (Phase B: three stages — daily-log distill → inbox pass → memory curation):
+uv run python .claude/scripts/memory_reflect.py [--dry-run] [--inbox-only | --curate-only | --skip-inbox] [--project <slug>]
+
+# Dreaming (Phase B) — procedure + decision extraction → playbook/ (Haiku, adaptive):
+uv run python .claude/scripts/memory_dream.py [--dry-run] [--since-days N]
+uv run python .claude/scripts/memory_dream.py --deliver-questions [--dry-run]   # ask low-confidence decisions via notify adapter
+uv run python .claude/scripts/memory_dream.py --reconcile [--dry-run]           # fold tagged replies back into entries
+
+# Modular cadence (Phase B) — generate split timer units from brain-config.json:
+uv run python .claude/scripts/gen_schedules.py [--platform mac|vps|both] [--dry-run]
 
 # Knowledge-gap scan (BaaS C1 — stale ongoing-entity detector):
 uv run python .claude/scripts/gap_analysis.py            # human table
@@ -161,7 +173,7 @@ Hooks in `.claude/settings.json` invoke scripts via `uv run python ...` so they 
 
 ## Memory search (Phase 3)
 
-Embedding model: `BAAI/bge-small-en-v1.5` via FastEmbed (384-dim, asymmetric — `passage_embed` for indexing, `query_embed` for retrieval). Cache: `.claude/data/fastembed_cache/`. DB: `.claude/data/state/memory.db` (SQLite + sqlite-vec + FTS5; same engine on Mac and VPS — each host keeps its own index, rebuilt from the synced vault). Hybrid retrieval merges vector top-k×3 + FTS top-k×3 via RRF (k=60). The indexer excludes `Memory/personal/finance.md` per the SOUL.md no-financial-data boundary.
+Embedding model: `BAAI/bge-small-en-v1.5` via FastEmbed (384-dim, asymmetric — `passage_embed` for indexing, `query_embed` for retrieval). Cache: `.claude/data/fastembed_cache/`. DB: `.claude/data/state/memory.db` (SQLite + sqlite-vec + FTS5; same engine on Mac and VPS — each host keeps its own index, rebuilt from the synced vault). Hybrid retrieval merges vector top-k×3 + FTS top-k×3 via RRF (k=60). The indexer excludes `Memory/personal/finance.md` per the SOUL.md no-financial-data boundary. An **unscoped** search also appends up to 3 lexical matches from the Phase-B pending-personal buffer (`personal_pending.json`, today's not-yet-curated items — not in the index) tagged `pending:true`; scoped (`--path-prefix`) searches skip it (see Phase B).
 
 ### Graph traversal over wikilinks (C1, BaaS retrieval-v2)
 
@@ -214,7 +226,14 @@ CLI flags: `--dry-run` (print stages + would-be agent prompt; skip SDK calls + v
 
 ### `memory_reflect.py` (daily 08:00 BRT in Phase 9, before heartbeat)
 
-`memory_reflect.py` runs **two independent, idempotent stages** orchestrated by `_run()`; each has its own state file, so the inbox stage runs even when the daily-log stage short-circuits.
+> **Superseded in part by Phase B** (see "## Phase B" below). The MEMORY.md write
+> moved out of the daily-log + inbox stages into a new **memory-curation** stage:
+> both now BUFFER personal items (`personal_pending.json`); curation drains the
+> buffer + evicts-to-archive ONCE per day. The per-batch `_compact_if_over_cap`
+> squeeze on MEMORY.md is gone. The inbox stage's strip/clear/continuity behavior
+> below is unchanged.
+
+`memory_reflect.py` runs **three independent, idempotent stages** orchestrated by `_run()` (daily-log distill → inbox pass → memory curation); each has its own state file, so a later stage runs even when an earlier one short-circuits.
 
 **Daily-log stage** (`_run_daily_stage`): single Sonnet 4.6 call (`allowed_tools=[]`, `setting_sources=None`, `max_turns=1`). Reads yesterday's daily log + current MEMORY.md; emits JSON of `[{type, text, promote}]` per item; deterministic Python applies promotions to the right MEMORY.md section (decision → "Key durable decisions", lesson → "Lessons", fact → "Tax & financial structure", status → "Active projects"). If MEMORY.md > 8KB after append, a SECOND Sonnet call compacts older entries first (floor-guarded against truncated/garbage returns). SOUL.md changes go to today's daily log under "## SUGGESTED SOUL CHANGES (REVIEW MANUALLY)" — never directly written. Idempotent via `.claude/data/state/last_reflection.json`.
 
@@ -302,6 +321,119 @@ Conventions: reporting lives at the CLI boundary (`main()`), never in library fu
 
 **Phase 2 — onboarding provisioning** (`provision_healthchecks.py`): one command per brain×host upserts the checks via the healthchecks.io v3 API (`unique:["name"]` → idempotent), applies the naming/tag/grace conventions from `SERVICE_CATALOG`, and emits the env block for the instance's `.env`. Model: one Protostack healthchecks account, **one project per brain** (API keys are project-scoped — the key selects the brain), alerts via project integrations (`channels:"*"`) into the shared Protostack ops channel. **Provision only instrumented services** (a check nothing pings = permanent red): probes-first starter is `memory-doctor,slackbot-watchdog` (external probes, zero changes to a brain's existing scripts). First dogfood: LisaOS — runbook at `projects/Brain/lisaos-monitoring-onboarding.md` (vault); the BrunOS↔LisaOS boundary holds: Bruno provisions, Lisa instruments her side. Phase 3 (thin fleet page over the healthchecks API) is ClickUp-tracked, TBD.
 
+## Phase B — Dreaming + Reflect finalization (modular cadence, 2026-06-06)
+
+Two passes read the same session captures and extract orthogonal things:
+**reflection** curates KNOWLEDGE into MEMORY.md; **dreaming** curates PROCEDURE +
+DECISIONS into `playbook/`. Plus a config store makes every cadence + behavior
+per-brain with working defaults. Plan: `.agent/plans/phase-b-dreaming-reflect-finalization.md`.
+
+### brain-config.json — the per-brain config store
+
+`.claude/scripts/brain_config.py` exposes `get("dotted.path")` returning `DEFAULTS`
+deep-merged with `.claude/data/state/brain-config.json` (an **absent file → pure
+defaults**, so a fresh brain needs zero config). Behavior toggles are read at
+**runtime** by reflect/dream; cadence strings are consumed only by
+`gen_schedules.py`. Template (with the documented defaults) ships at
+`Memory/Brain/brain-config.template.json`. Schema:
+
+```jsonc
+{
+  "role": "individual",                       // "individual" | "company"
+  "reflection": {
+    "inbox_pass":      { "enabled": true, "cadence": "hourly", "hours": "08-20" },
+    "memory_curation": { "enabled": true, "cadence": "daily@08:00" },
+    "federation":      true                    // strip+clear+forward (false = solo brain)
+  },
+  "dreaming": {
+    "enabled": true, "cadence": "nightly@03:00",
+    "trigger_min_captures": 5,                 // adaptive: skip the sweep below this
+    "extract": ["processes", "decisions"],
+    "decision_prompts": { "enabled": true, "max_per_day": 3, "confidence_threshold": 0.6 }
+  },
+  "notify": { "adapter": "slack", "target": null }   // adapter ∈ {slack, none}; null = default DM
+}
+```
+
+### Reflect finalization — buffer → curate → evict
+
+The hourly inbox pass and the daily-log distill no longer write MEMORY.md; they
+**buffer** promotable personal items to `personal_pending.json`. The new
+**memory-curation** stage (`_run_memory_curation_stage`, daily) drains that buffer
+into MEMORY.md **once** via `_append_promotions`, then runs
+`_evict_to_archive_if_over_cap` **once**. Result: MEMORY.md is written/compacted at
+most once per day (no per-batch churn) and its byte size is stable.
+
+Eviction is **deterministic, zero-LLM, and lossless**: while over the 8KB cap, peel
+the **oldest dated bullet** (`- **YYYY-MM-DD** —`) from the **largest section** and
+append it verbatim (+ provenance) to `_archive/MEMORY-archive.md`. Undated context
+bullets (links, aliases) are never touched; if no dated bullet remains to peel, the
+doc is left intact and `still_over_cap` is surfaced to monitoring
+(`curate_memory_over_cap`). The old LLM squeeze (`_compact_if_over_cap`) stays only
+as the project-doc compactor. Stage flags: `--inbox-only` (hourly), `--curate-only`
+(drain+evict), `--skip-inbox` (daily-log distill + curate). Each stage gated by its
+brain-config `enabled` toggle; `federation:false` makes the inbox pass extract-only
+(no strip/clear). Tests: `tests/test_reflect_eviction.py`.
+
+### Dreaming — `memory_dream.py` (Haiku, adaptive)
+
+`CLAUDE_INVOKED_BY=dream`. Gathers captures under `Memory/_inbox/sessions/`
+(recursively, incl. per-project `_archive/`) created > the `dream.json` watermark.
+**Adaptive gate**: fewer than `trigger_min_captures` new → log + exit 0 (no model
+call). Otherwise one Haiku 4.5 call per batch → JSON entries
+`{kind: process|pattern|prompt|decision}`. Each candidate is **deduped** against the
+existing playbook via `memory_search.py --path-prefix playbook` (mirrors digest.py;
+fail-open). **Confidentiality**: the prompt instructs the model to generalize away
+project identifiers, and every entry body runs through `scrub_excluded_entities` +
+`scrub_secrets` before write — a Vertik-derived pattern lands as reusable craft, never
+a leak. Entries are written as `playbook/<slug>.md` (schema in `playbook/_README.md`);
+the watermark advances to the newest processed capture (re-run = no-op via watermark +
+dedup). `--since-days N` widens the window for manual dry-run inspection. Tests:
+`tests/test_dream.py`.
+
+### Decision-rationale feedback loop
+
+A decision extracted with `confidence < confidence_threshold` is written
+**provisionally** (`confidence: low` + an open-question note) AND enqueues a question
+in `decision_questions.json`. `notify_adapter.py` is the pluggable "ask the person"
+seam: `get_adapter()` returns a `SlackAdapter` (default — DMs via the Phase-4 bot,
+target = `notify.target` / `$BRUNOS_NOTIFY_TARGET` / `$BRUNOS_ALERT_CHANNEL`, tagging
+`[ref:<id>]`) or a `NoneAdapter` (no-op; unknown adapter falls back here). Delivery
+(`--deliver-questions`) is rate-limited to `decision_prompts.max_per_day` and marks a
+question `asked` only on **confirmed** send (NoneAdapter confirms nothing → fail-safe).
+Reconciliation (`--reconcile`) scans tagged Slack replies, matches by ref-id (v1
+simple match — the noted tuning risk), patches the playbook entry (confidence low→high
++ confirmed rationale), and marks the question answered. Tests:
+`tests/test_decision_loop.py`.
+
+### Modular cadence — `gen_schedules.py` + split units
+
+`gen_schedules.py` reads brain-config cadence strings and emits the platform's timer
+units (`--platform mac|vps|both`, default = host OS; `--dry-run` prints them;
+idempotent). It **splits** the single `brunoosbrain-reflect` / `com.bruno.brunos.reflection`
+unit into three:
+
+| key | runs | default cadence |
+|-----|------|-----------------|
+| `reflect-inbox` | `memory_reflect.py --inbox-only` | hourly 08–20 (`OnCalendar=*-*-* 08..20:00:00`) |
+| `reflect-curate` | `memory_reflect.py --skip-inbox` | daily 08:00 |
+| `dream` | `memory_dream.py` | nightly 03:00 |
+
+**Migration (host ops):** the legacy `brunoosbrain-reflect.{service,timer}` and
+`com.bruno.brunos.reflection.plist` are kept in `deploy/` but **superseded** — on each
+host, disable the old timer and enable the three new units after deploy. dreaming +
+delivery/reconcile are not yet wired into the scheduler beyond these units (the morning
+heartbeat piggyback for delivery is the intended follow-up).
+
+### New state files (`.claude/data/state/`, gitignored runtime)
+
+- `brain-config.json` — this brain's cadence + behavior (absent → defaults).
+- `personal_pending.json` — buffered personal items awaiting daily curation. **Surfaced intraday** (it isn't in the vault/index until curation): `build_context()` injects a `pending-personal` block right after MEMORY.md (every session: interactive, chat, heartbeat), and an **unscoped** `memory_search` appends up to 3 lexical buffer matches tagged `pending:true` (scoped `--path-prefix` searches — incl. dedup callers — skip it; `--no-pending`/`BRUNOS_SEARCH_NO_PENDING` disables). Helpers: `shared.load_personal_pending` / `shared.format_personal_pending`.
+- `dream.json` — dream watermark + processed capture ids.
+- `decision_questions.json` — rationale-prompt queue.
+
+`CLAUDE_INVOKED_BY` value added this phase: `dream` (set before the SDK import).
+
 ## Deployment (Phase 9)
 
 Two-host deployment: a **Hetzner CX21 ARM64 droplet at `49.13.165.23`, shared with Lisa**, hosts the always-on services (heartbeat, reflection, weekly review, news digest, Slack chat bot, vault git-sync, code git-sync) under a `brunoosbrain-*` systemd namespace; Mac keeps the same units installed as launchd plists with `Disabled=true` for one-command failover. Vault becomes its own private GitHub repo with a `concat-both` merge driver so daily-log appends survive bidirectional sync. Storage stays on **SQLite + sqlite-vec on both hosts** — the DB file (`.claude/data/state/memory.db`) is per-host, rebuilt from the synced vault on first run.
@@ -324,8 +456,8 @@ Two-host deployment: a **Hetzner CX21 ARM64 droplet at `49.13.165.23`, shared wi
 deploy/
   README.md                          operator runbook (read this first)
   bin/                               idempotent helpers (seed/bootstrap/sync/install/merge-driver) + git_sync.py / sync_inbox.py (uv launchd shims, TCC workaround) + sync_cleared_inbox.py / retire_local_inbox.py / consolidate_inbox_slugs.py (federation read-side)
-  launchd/com.bruno.brunos.*.plist   9 Mac plists (Disabled=true except git-sync, inbox-rsync + codex-watcher; enabled units run via uv shims; inbox-retire ships disabled until dry-runs reviewed)
-  systemd/brunoosbrain-*             12 services + 10 timers (slackbot daemon has no timer; slackbot-restart weekly recycle; federation-doctor + memory-doctor daily; slackbot-watchdog every 15 min)
+  launchd/com.bruno.brunos.*.plist   Mac plists (Disabled=true except git-sync, inbox-rsync + codex-watcher; enabled units run via uv shims; inbox-retire ships disabled until dry-runs reviewed). Phase B added reflect-inbox / reflect-curate / dream (generated by gen_schedules.py; supersede the legacy reflection.plist).
+  systemd/brunoosbrain-*             services + timers (slackbot daemon has no timer; slackbot-restart weekly recycle; federation-doctor + memory-doctor daily; slackbot-watchdog every 15 min). Phase B added brunoosbrain-{reflect-inbox,reflect-curate,dream}.{service,timer} (generated; supersede the legacy brunoosbrain-reflect unit).
   systemd/linosbrain-*               4 services + 3 timers (consumer/reflect/vault-sync + alert@) — LinOS node, not yet provisioned
   vault/{gitignore,gitattributes}    templates copied to BrunOS/.gitignore + .gitattributes at vault git-init
 setup.sh                             repo-root idempotent venv bootstrap (uv sync)

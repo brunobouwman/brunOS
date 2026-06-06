@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
 """SessionStart hook: dump BrunOS canonical context into the model's window.
 
-Reads (in order): SOUL.md, USER.md, MEMORY.md, last 3 daily logs, HEARTBEAT.md, HABITS.md.
-Falls through to BOOTSTRAP.md if it exists.
+Reads (in order): SOUL.md, USER.md, MEMORY.md, the pending-personal buffer
+(today's extracted-but-not-yet-curated items), last 3 daily logs, HEARTBEAT.md,
+HABITS.md. Falls through to BOOTSTRAP.md if it exists.
 
 Skipped when CLAUDE_INVOKED_BY ∈ {reflection, news-digest, weekly-review,
 memory_flush, chat} — those scripts compose their own minimal context and don't
@@ -27,7 +28,7 @@ from pathlib import Path
 REPO_ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(REPO_ROOT / ".claude" / "scripts"))
 
-from shared import vault_path  # noqa: E402
+from shared import format_personal_pending, vault_path  # noqa: E402
 
 
 CANONICAL_ORDER = ["SOUL.md", "USER.md", "MEMORY.md"]
@@ -35,8 +36,8 @@ TAIL_ORDER = ["HEARTBEAT.md", "HABITS.md"]
 
 PREAMBLE = (
     "<!-- BRUNOS_SESSION_INIT -->\n"
-    "BrunOS session context loaded below: SOUL.md, USER.md, MEMORY.md, last 3 daily logs, "
-    "HEARTBEAT.md, HABITS.md.\n\n"
+    "BrunOS session context loaded below: SOUL.md, USER.md, MEMORY.md, the pending-personal "
+    "buffer (today, not yet curated), last 3 daily logs, HEARTBEAT.md, HABITS.md.\n\n"
     "IF YOU CAN ONLY SEE THIS PREAMBLE AND A TRUNCATION NOTICE (you are running under Claude "
     "Code and the hook output exceeded the inline cap), the full payload was spilled to a file. "
     "The path appears in your system-reminder as \"Full output saved to: ...\". READ that file "
@@ -71,6 +72,12 @@ def build_context() -> str:
         body = _read(memory / name)
         if body:
             parts.append(_wrap(name, body))
+
+    # Today's not-yet-curated personal items (Phase B buffer). Sits right after
+    # MEMORY.md so the agent reads it as the fresh tail of durable memory.
+    pending = format_personal_pending()
+    if pending:
+        parts.append(_wrap("pending-personal", pending))
 
     daily_dir = memory / "daily"
     if daily_dir.is_dir():

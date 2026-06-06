@@ -445,6 +445,50 @@ def load_state(path: os.PathLike[str] | str, default=None):
         return default
 
 
+# --- Personal pending buffer (Phase B) ---------------------------------------
+# The hourly inbox pass + daily-log distill buffer promotable personal items here
+# instead of writing MEMORY.md per batch; the daily curation stage drains it. It's
+# canonical knowledge that just hasn't been promoted yet — so the agent's context
+# (session-start-context) and memory_search surface it intraday, otherwise a fact
+# learned at 09:00 wouldn't be recallable until tomorrow's curation + reindex.
+PERSONAL_PENDING_PATH = STATE_DIR / "personal_pending.json"  # [{type,text,source,ts}]
+
+
+def load_personal_pending() -> list[dict]:
+    """Return the buffered personal items (list of {type,text,source,ts}); [] if none."""
+    data = load_state(PERSONAL_PENDING_PATH, default=[])
+    return data if isinstance(data, list) else []
+
+
+def format_personal_pending(items: list[dict] | None = None) -> str:
+    """Render the pending buffer as a markdown block for the agent's context.
+
+    Empty string when the buffer is empty (caller omits the section). Each item is
+    one bullet tagged with its type + originating project so the agent can weigh it
+    like a MEMORY.md entry that hasn't been curated yet.
+    """
+    items = load_personal_pending() if items is None else items
+    lines: list[str] = []
+    for it in items:
+        if not isinstance(it, dict):
+            continue
+        text = str(it.get("text") or "").strip()
+        if not text:
+            continue
+        typ = str(it.get("type") or "note")
+        src = str(it.get("source") or "").strip()
+        suffix = f"  _[{src}]_" if src else ""
+        lines.append(f"- ({typ}) {text}{suffix}")
+    if not lines:
+        return ""
+    return (
+        "## Pending personal (extracted today, not yet curated into MEMORY.md)\n"
+        "_Drained into MEMORY.md by the daily curation pass. Treat as fresh, "
+        "low-friction memory; verify before relying on it for an irreversible action._\n"
+        + "\n".join(lines)
+    )
+
+
 def _extract_status(exc: BaseException) -> int | None:
     sc = getattr(exc, "status_code", None)
     if isinstance(sc, int):
