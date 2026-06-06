@@ -5,6 +5,12 @@
     <key>Label</key>
     <string>com.bruno.brunos.reflect-inbox</string>
 
+    <!-- Failover unit: ships disabled on the Mac (reflection/dream run on the
+         VPS; MEMORY.md/playbook writes aren't dual-run safe). Operator enables
+         on failover — see deploy/bin/install-mac-launchd.sh. -->
+    <key>Disabled</key>
+    <true/>
+
     <key>WorkingDirectory</key>
     <string>/Users/brunobouwman/Documents/brunOS-brain</string>
 

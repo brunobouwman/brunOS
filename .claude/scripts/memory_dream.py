@@ -538,18 +538,46 @@ def reconcile_from_text(blob: str, dry_run: bool = False) -> int:
     return n
 
 
+RECONCILE_LOOKBACK_HOURS = 48  # how far back to scan DMs for tagged replies
+
+
 def _reconcile_from_slack(dry_run: bool) -> int:
-    """Best-effort: pull recent Slack DMs and reconcile any tagged replies. Never
-    raises — a missing/!slack adapter just means zero reconciled."""
+    """Best-effort: scan recent Slack DMs for [ref:<id>] replies and reconcile them.
+
+    Skips the Slack read entirely when no question is asked-but-unanswered (the
+    common case), so this is free to call every heartbeat tick. Reads a bounded
+    history window DIRECTLY (conversations_history) instead of dms_since_last_run —
+    so it never advances the shared slack-state watermark the heartbeat/chat bot
+    rely on. Idempotent (reconcile_answer no-ops once answered). Never raises."""
+    queue = load_state(DECISION_QUESTIONS_PATH, default=[])
+    if not isinstance(queue, list) or not any(
+        isinstance(q, dict) and q.get("asked") and not q.get("answered") for q in queue
+    ):
+        _log("  reconcile: no outstanding asked questions; skipping Slack read")
+        return 0
     try:
         from integrations import slack
 
-        msgs = slack.dms_since_last_run(slack._client())
+        client = slack._client()
+        oldest = (now_brt() - timedelta(hours=RECONCILE_LOOKBACK_HOURS)).timestamp()
+        texts: list[str] = []
+        for ch in slack.list_channels(client):
+            if not ch.is_im:
+                continue
+            try:
+                resp = client.conversations_history(
+                    channel=ch.id, oldest=f"{oldest:.6f}", limit=50
+                )
+            except Exception:  # noqa: BLE001 — one bad channel never aborts the scan
+                continue
+            for m in resp.get("messages", []):
+                t = m.get("text") or ""
+                if t:
+                    texts.append(t)
     except Exception as e:  # noqa: BLE001
         _log(f"  reconcile: slack read failed ({type(e).__name__}: {e}); 0 reconciled")
         return 0
-    blob = "\n".join(getattr(m, "text", "") or "" for m in msgs)
-    return reconcile_from_text(blob, dry_run=dry_run)
+    return reconcile_from_text("\n".join(texts), dry_run=dry_run)
 
 
 def _dump_debug(label: str, payload: str) -> None:
@@ -696,10 +724,14 @@ def main(argv: list[str]) -> int:
     args = parser.parse_args(argv[1:])
 
     if args.deliver_questions:
-        _deliver_questions(dry_run=args.dry_run)
+        n = _deliver_questions(dry_run=args.dry_run)
+        if not args.dry_run:
+            print(json.dumps({"asked": n}))  # machine-readable for the heartbeat stage
         return 0
     if args.reconcile:
-        _reconcile_from_slack(dry_run=args.dry_run)
+        n = _reconcile_from_slack(dry_run=args.dry_run)
+        if not args.dry_run:
+            print(json.dumps({"reconciled": n}))
         return 0
     return _run(dry_run=args.dry_run, since_days=args.since_days)
 

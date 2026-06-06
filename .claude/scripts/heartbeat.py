@@ -110,6 +110,37 @@ def _reindex() -> None:
         _log(f"  re-index failed (continuing): {type(e).__name__}: {e}")
 
 
+def _decision_rationale_loop() -> str:
+    """Phase B: deliver queued low-confidence decision questions (rate-limited) +
+    reconcile any tagged answers, by shelling out to memory_dream. No-op (no
+    subprocess) when the queue is empty — so it's free until dreaming produces
+    questions. Best-effort; never raises. Returns a short summary for the tick."""
+    queue = load_state(STATE_DIR / "decision_questions.json", default=[])
+    if not isinstance(queue, list) or not queue:
+        return ""
+    script = REPO_ROOT / ".claude" / "scripts" / "memory_dream.py"
+    parts: list[str] = []
+    for mode, key in (("--deliver-questions", "asked"), ("--reconcile", "reconciled")):
+        try:
+            r = subprocess.run(
+                [sys.executable, str(script), mode],
+                capture_output=True, text=True, timeout=120, check=False,
+            )
+        except (OSError, subprocess.SubprocessError) as e:
+            _log(f"  decision-rationale {mode} failed: {type(e).__name__}: {e}")
+            continue
+        if r.returncode != 0:
+            _log(f"  decision-rationale {mode} rc={r.returncode}: {r.stderr.strip()[:150]}")
+            continue
+        try:
+            n = int(json.loads(r.stdout.strip().splitlines()[-1]).get(key, 0))
+        except (json.JSONDecodeError, ValueError, IndexError, AttributeError):
+            n = 0
+        if n:
+            parts.append(f"{key} {n}")
+    return ", ".join(parts)
+
+
 # --- Stage 2: parallel gather ---
 
 
@@ -762,6 +793,15 @@ def _run(dry_run: bool, no_agent: bool, force: bool) -> int:
         except Exception as e:
             _log(f"  gap analysis failed: {type(e).__name__}: {e}")
 
+    # Stage 4c: decision-rationale loop (Phase B) — deliver queued low-confidence
+    # decision questions + reconcile answers. Runs BEFORE the fast-path so a quiet
+    # day still asks pending questions. No-op (no subprocess) when the queue is empty.
+    rationale_summary = ""
+    if not dry_run:
+        rationale_summary = _decision_rationale_loop()
+        if rationale_summary:
+            _log(f"  decision-rationale: {rationale_summary}")
+
     # Stage 5a: --no-agent takes precedence (debug flag — predictable logs)
     if no_agent:
         _log("stage 5: --no-agent; deterministic stages done; skipping SDK calls")
@@ -792,6 +832,8 @@ def _run(dry_run: bool, no_agent: bool, force: bool) -> int:
             msg = sync_warn or "No changes"
             if gap_summary:
                 msg = f"{msg} | gaps: {gap_summary}"
+            if rationale_summary:
+                msg = f"{msg} | rationale: {rationale_summary}"
             _notify("BrunOS heartbeat", msg[:120])
             _record_tick("fast-path", gap_summary, delta=delta)
         return 0

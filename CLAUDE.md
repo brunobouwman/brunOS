@@ -217,7 +217,7 @@ Two manually-runnable proactive scripts. Phase 9 wires launchd / systemd schedul
 1. Re-index vault (subprocess `memory_index.py`).
 2. Gather Slack/GitHub/ClickUp/Gmail/Calendar/RSS in parallel via `asyncio.gather` (each integration call wrapped in `asyncio.to_thread`; `return_exceptions=True` so one failure doesn't abort the tick).
 3. Build snapshot (`heartbeat_snapshot.build_snapshot`); diff against previous (`heartbeat_snapshot.diff_snapshot`); persist current snapshot to `.claude/data/state/heartbeat-state.json` BEFORE the agent runs (a crash-during-agent doesn't replay the same delta on next tick).
-4. Drafts hygiene (`drafts.expire_old_drafts` — moves >24h-old drafts to `drafts/expired/`; `drafts.capture_sent_replies` is a Phase 6.5 stub) + habits prep (`habits.reset_for_today_if_needed` archives yesterday's "## Today" to "## History" and rebuilds a fresh checklist; `habits.detect_signals` computes per-pillar booleans from the snapshot diff) + **knowledge-gap scan** (`gap_analysis.gaps_to_surface` — see below).
+4. Drafts hygiene (`drafts.expire_old_drafts` — moves >24h-old drafts to `drafts/expired/`; `drafts.capture_sent_replies` is a Phase 6.5 stub) + habits prep (`habits.reset_for_today_if_needed` archives yesterday's "## Today" to "## History" and rebuilds a fresh checklist; `habits.detect_signals` computes per-pillar booleans from the snapshot diff) + **knowledge-gap scan** (`gap_analysis.gaps_to_surface` — see below) + **decision-rationale loop** (Phase B stage 4c, `_decision_rationale_loop` — deliver queued low-confidence decision questions + reconcile answers; see the Phase B section).
 5. If delta is empty AND no habits-reset AND no drafts expired → fast-path: append a one-line tick to today's daily log + `_notify` "no changes" + exit. Otherwise: build sanitized `delta_text` (every external payload through `sanitize.wrap_external`) → Haiku 4.5 guardrail (`allowed_tools=[]`, `setting_sources=None`, `max_turns=1`, default-deny on parse failure) → on `pass`/`suspicious`, Sonnet 4.6 main agent (`allowed_tools=["Read","Write","Edit","Bash"]`, `setting_sources=["project"]`, `max_turns=15`) → osascript notify.
 
 The main agent's tools include Bash but the system prompt forbids invoking `query.py slack send` or any external curl. Phase 8's `dangerous-bash.py` hardens this; Phase 6 ships honor-system + tools-whitelist.
@@ -406,6 +406,13 @@ simple match — the noted tuning risk), patches the playbook entry (confidence 
 + confirmed rationale), and marks the question answered. Tests:
 `tests/test_decision_loop.py`.
 
+**Wired into the heartbeat** (stage 4c, `_decision_rationale_loop`): every tick shells
+out `--deliver-questions` + `--reconcile`, BEFORE the empty-delta fast-path so a quiet
+day still asks. Both are no-ops with no subprocess when the queue is empty; reconcile
+further skips the Slack read unless a question is asked-but-unanswered, and reads a
+bounded history window directly (NOT `dms_since_last_run`) so it never advances the
+shared slack-state watermark.
+
 ### Modular cadence — `gen_schedules.py` + split units
 
 `gen_schedules.py` reads brain-config cadence strings and emits the platform's timer
@@ -419,11 +426,16 @@ unit into three:
 | `reflect-curate` | `memory_reflect.py --skip-inbox` | daily 08:00 |
 | `dream` | `memory_dream.py` | nightly 03:00 |
 
-**Migration (host ops):** the legacy `brunoosbrain-reflect.{service,timer}` and
-`com.bruno.brunos.reflection.plist` are kept in `deploy/` but **superseded** — on each
-host, disable the old timer and enable the three new units after deploy. dreaming +
-delivery/reconcile are not yet wired into the scheduler beyond these units (the morning
-heartbeat piggyback for delivery is the intended follow-up).
+Generated systemd timers pin `America/Sao_Paulo` in `OnCalendar` (the VPS runs UTC —
+a bare time would fire 3h off); launchd plists ship `Disabled=true` (failover; Mac
+isn't dual-run safe for MEMORY/playbook writes).
+
+**Migration — DONE (2026-06-06).** VPS migrated: legacy `brunoosbrain-reflect.timer`
+disabled, the three split timers enabled (verified BRT-aligned next-runs). Mac:
+`install-mac-launchd.sh` installed the three plists disabled (failover). The legacy
+`brunoosbrain-reflect.{service,timer}` + `com.bruno.brunos.reflection.plist` were
+removed from `deploy/`. delivery/reconcile are wired into the heartbeat (stage 4c,
+above) — so this is the full Phase B activation, not just unit files.
 
 ### New state files (`.claude/data/state/`, gitignored runtime)
 
