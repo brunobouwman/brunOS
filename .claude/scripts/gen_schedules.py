@@ -37,6 +37,11 @@ LAUNCHD_DIR = REPO_ROOT / "deploy" / "launchd"
 VPS_WORKDIR = "/home/bruno/claude-second-brain"
 VPS_UV = "/usr/local/bin/uv"
 VPS_USER = "bruno"
+# systemd interprets a bare OnCalendar in the system timezone (the VPS runs UTC),
+# so the BRT cadence MUST carry an explicit zone or it fires 3h off. (launchd
+# StartCalendarInterval uses the Mac's local time — already BRT — so no suffix
+# there; the plist TZ env only sets the process clock, not the trigger.)
+TIMEZONE = "America/Sao_Paulo"
 MAC_WORKDIR = "/Users/brunobouwman/Documents/brunOS-brain"
 MAC_UV = "/Users/brunobouwman/.local/bin/uv"
 MAC_PATH = "/Users/brunobouwman/.local/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin"
@@ -104,8 +109,8 @@ def parse_cadence(cadence: str | None, hours: str | None = None) -> dict:
 def systemd_oncalendar(d: dict) -> str:
     if d["kind"] == "hourly":
         lo, hi = d["hours"][0], d["hours"][-1]
-        return f"*-*-* {lo:02d}..{hi:02d}:{d['minute']:02d}:00"
-    return f"*-*-* {d['hour']:02d}:{d['minute']:02d}:00"
+        return f"*-*-* {lo:02d}..{hi:02d}:{d['minute']:02d}:00 {TIMEZONE}"
+    return f"*-*-* {d['hour']:02d}:{d['minute']:02d}:00 {TIMEZONE}"
 
 
 def systemd_service(unit: dict) -> str:

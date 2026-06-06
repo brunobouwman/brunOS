@@ -2,7 +2,7 @@
 Description=brunoosbrain inbox pass — hourly
 
 [Timer]
-OnCalendar=*-*-* 08..20:00:00
+OnCalendar=*-*-* 08..20:00:00 America/Sao_Paulo
 Persistent=true
 Unit=brunoosbrain-reflect-inbox.service
 
