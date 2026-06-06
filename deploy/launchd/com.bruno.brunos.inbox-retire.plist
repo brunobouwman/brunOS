@@ -12,15 +12,14 @@
          captures and is a failover-duplication hazard. Counterpart to the VPS
          retirement job.
 
-         DISABLED by default: review dry-runs first (the script defaults to dry-run;
-         this unit passes --apply). Enable only after you trust the dry-run output:
+         Enabled after dry-run review (task 86ca5bhww). The script is fail-safe
+         (never deletes if the VPS is unreachable or its terminal set is empty).
+         To reinstall from source:
            cp deploy/launchd/com.bruno.brunos.inbox-retire.plist ~/Library/LaunchAgents/
-           # set Disabled to false, then:
            launchctl load ~/Library/LaunchAgents/com.bruno.brunos.inbox-retire.plist
-         The script is fail-safe (never deletes if the VPS is unreachable or its
-         terminal set is empty). -->
+      -->
     <key>Disabled</key>
-    <true/>
+    <false/>
 
     <key>RunAtLoad</key>
     <false/>
