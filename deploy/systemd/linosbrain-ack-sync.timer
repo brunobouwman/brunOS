@@ -1,0 +1,10 @@
+[Unit]
+Description=linosbrain ack-sync — daily 09:30 BRT (after consumer/reflect/dream, before the 10:30 retire job)
+
+[Timer]
+OnCalendar=*-*-* 09:30 America/Sao_Paulo
+Persistent=true
+Unit=linosbrain-ack-sync.service
+
+[Install]
+WantedBy=timers.target

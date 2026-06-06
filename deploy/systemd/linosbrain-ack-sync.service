@@ -1,0 +1,19 @@
+[Unit]
+Description=linosbrain ack-sync — push LinOS ack manifests back to the BrunOS producer
+After=network-online.target
+Wants=network-online.target
+OnFailure=linosbrain-alert@%n.service
+
+[Service]
+Type=oneshot
+User=linos
+Group=linos
+WorkingDirectory=/home/linos/claude-second-brain
+EnvironmentFile=/home/linos/claude-second-brain/.claude/.env
+Environment=TZ=America/Sao_Paulo
+Environment=PATH=/usr/local/bin:/usr/bin:/bin
+ExecStart=/usr/local/bin/uv run python deploy/bin/sync_acks.py
+TimeoutStartSec=300
+LogsDirectory=linosbrain
+StandardOutput=append:/var/log/linosbrain/ack-sync.log
+StandardError=append:/var/log/linosbrain/ack-sync.log

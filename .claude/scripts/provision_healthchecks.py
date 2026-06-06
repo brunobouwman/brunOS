@@ -120,6 +120,11 @@ SERVICE_CATALOG: dict[str, dict] = {
         "timeout": 86400, "grace": 21600,
         "desc": "company-brain consumer loop (linos_consumer.py)",
     },
+    "linos-ack-sync": {
+        "env": "LINOS_ACK_SYNC_HEALTHCHECK_URL",
+        "schedule": "30 9 * * *", "grace": 3600,
+        "desc": "federation ack return-leg: push LinOS acks → bruno (sync_acks.py)",
+    },
 }
 
 # Sensible default subset for a fresh personal brain on one host (the LisaOS
