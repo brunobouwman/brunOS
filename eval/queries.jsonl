@@ -2,7 +2,7 @@
 {"query": "BaaS go-to-market pitch and pricing tiers", "gold": ["projects/Brain/baas_gtm_pricing.md"]}
 {"query": "brain-as-a-service product vision and differentiation versus gbrain", "gold": ["projects/Brain/brain_as_a_service.md"]}
 {"query": "the three buckets of BaaS product scope", "gold": ["projects/Brain/baas_product_scope.md"]}
-{"query": "graph traversal and retrieval quality improvements for the brain", "gold": ["projects/Brain/baas_product_scope.md"]}
+{"query": "graph traversal and retrieval quality improvements for the brain", "gold": ["projects/Brain/baas_product_scope.md", "projects/Brain/brunos_followups.md"]}
 {"query": "autonomous dev skill pipeline design", "gold": ["projects/Brain/autonomous_dev_skill.md"]}
 {"query": "access policy tiers full exec dept none", "gold": ["projects/Brain/ACCESS_POLICY.md"]}
 {"query": "monitoring and observability requirements for the brain", "gold": ["projects/Brain/monitoring-observability-prd.md"]}
@@ -18,3 +18,17 @@
 {"query": "the five daily habit pillars", "gold": ["HABITS.md"]}
 {"query": "Bruno's tech stack and career arc", "gold": ["USER.md"]}
 {"query": "botmaster onboarding kit for the company brain", "gold": ["projects/Brain/botmaster-onboarding-kit.md"]}
+{"query": "the full BaaS product plan across scope, pricing, and the security model", "gold": ["projects/Brain/brain_as_a_service.md", "projects/Brain/baas_product_scope.md", "projects/Brain/baas_gtm_pricing.md", "projects/Brain/baas_security_privacy.md"]}
+{"query": "how a new company brain is onboarded: seed contract, channel registry, personas, and the installer", "gold": ["projects/Brain/company_brain_seed_contract.md", "projects/Brain/company_brain_channel_registry.md", "projects/Brain/company_brain_personas_as_skills.md", "projects/Brain/onboarding_installer.md"]}
+{"query": "orcamento feature design with the grounding-bug investigation and the prod debug playbook", "gold": ["projects/vertik/vertik_orcamento.md", "projects/vertik/orcamento_grounding_debug.md", "projects/vertik/orcamento_status_doc_task_prompt.md", "projects/vertik/vertik_prod_debug.md"]}
+{"query": "Vertik modular base product with the add-ons strategy and clean-architecture refactor", "gold": ["projects/vertik/vertik_modular_addons_strategy.md", "projects/vertik/vertik_clean_architecture.md", "projects/vertik/vertik_ideas.md", "projects/vertik/vertik_produto_base_meeting_script.md"]}
+{"query": "code-grounded brain architecture reference: components, data flows, deployment topology, diagnosis", "gold": ["projects/Brain/architecture/README.md", "projects/Brain/architecture/01-system-architecture.md", "projects/Brain/architecture/02-component-inventory.md", "projects/Brain/architecture/03-data-flows.md", "projects/Brain/architecture/04-deployment-topology.md", "projects/Brain/architecture/05-diagnosis-checklist.md"]}
+{"query": "Memorial Colinas WhatsApp agent: architecture, proposal, and LGPD responsibility split", "gold": ["projects/Protostack/colinas.md", "clients/memorial-colinas/agent-architecture.md", "clients/memorial-colinas/proposta-memorial-colinas.md", "clients/memorial-colinas/lgpd-responsabilidade.md"]}
+{"query": "which competitor borrows feed the BaaS product scope and security roadmap", "gold": ["projects/Brain/competitive_survey_2026-06.md", "projects/Brain/baas_product_scope.md", "projects/Brain/baas_security_privacy.md"]}
+{"query": "capturing knowledge from comms channels and governing which channels feed the brain", "gold": ["projects/Brain/comms_capture_feeders.md", "projects/Brain/company_brain_channel_registry.md"]}
+{"query": "how the autonomous dev-task PR skill fits the BaaS product and the personas layer", "gold": ["projects/Brain/autonomous_dev_skill.md", "projects/Brain/baas_product_scope.md", "projects/Brain/company_brain_personas_as_skills.md"]}
+{"query": "Bruno's personal vision and the move to Florianopolis", "gold": ["goals/personal_vision.md"]}
+{"query": "the AI mastery course plan and methodology", "gold": ["projects/ai_mastery_course.md"]}
+{"query": "ClickUp versus Obsidian: which tool is the source of truth for what", "gold": ["sources_of_truth.md"]}
+{"query": "the agent's identity, tone, and proactivity boundaries", "gold": ["SOUL.md"]}
+{"query": "Vertik internal architecture: the two services and how they communicate", "gold": ["projects/vertik/vertik_architecture.md"]}
