@@ -139,6 +139,15 @@ ahead of whatever the hint pointed at.
   vault-sync.) Report the cause, list the symptoms it explains.
 - Collapse co-symptoms under one root cause so the remediation plan fixes causes, not
   symptoms.
+- **Tag each finding `shared-code` vs `this-brain`.** Brains run a common code repo
+  (clones of the same `.claude/scripts`/`hooks`), so a defect in that code affects EVERY
+  brain — fix it once in the repo and it propagates on pull. A `this-brain` finding is
+  config / state / parity local to the brain being diagnosed (hand it to that brain's
+  owner; never reach into another brain to fix it). Before tagging `shared-code`, verify
+  the defect against the actual repo file (a finding can look local but be a shared bug —
+  e.g. a `block-secrets` pattern gap surfaced by a LisaOS run was a latent BrunOS gap too).
+  This tag is the routing decision: shared-code → one PR to the common repo; this-brain →
+  the owner's punch-list.
 
 ### Phase 5 — Report + ordered remediation plan
 

@@ -32,10 +32,13 @@ RELEASE-BLOCKERS: <none | list G2/G3/H2/I1/I5/J6/F2 failures>
 
 ## Findings (failures + degradations only)
 
-| Check | Status | Evidence (file:line / command → output) | Symptom or root cause? |
-|---|---|---|---|
-| <e.g. B2> | ⚠️ | <newest .md mtime 14:02 vs memory.db 09:40 → 4.3h> | symptom of J5 (vault-sync wedged) |
-| <…> | <…> | <…> | <…> |
+The **Scope** column routes the fix: `shared-code` = a bug in the common code repo that affects EVERY brain (fix once in the repo, propagates on pull) · `this-brain` = config / state / parity specific to this brain (hand to its owner). Verify shared-code findings against the actual repo before tagging.
+
+| Check | Status | Scope | Evidence (file:line / command → output) | Symptom or root cause? |
+|---|---|---|---|---|
+| <e.g. B2> | ⚠️ | this-brain | <newest .md mtime 14:02 vs memory.db 09:40 → 4.3h> | symptom of J5 (vault-sync wedged) |
+| <e.g. I-block-secrets> | ⚠️ | shared-code | <pattern misses google_client_secrets.json → affects all brains> | root cause (repo fix) |
+| <…> | <…> | <…> | <…> | <…> |
 
 ## Root-cause analysis
 
@@ -73,6 +76,8 @@ Release-blockers first, then critical → degraded → info._
 
 ## Handoff
 
+- **Shared-code fixes (fix once in the repo, benefits the whole fleet):** <list the `shared-code`-scoped findings → one PR to the common repo>
+- **This-brain fixes (hand to the brain's owner):** <list the `this-brain`-scoped findings → owner's punch-list; never reach into another brain to fix it>
 - **Suggested route:** <dev-task for code fixes · ClickUp cards for ops/tracking · inline for config-only>
-- **Do NOT auto-apply** — Bruno triggers remediation per-task.
+- **Do NOT auto-apply** — the operator triggers remediation per-task.
 - **Deferred / could-not-verify:** <checks that needed a command this brain doesn't expose → manual check needed>
