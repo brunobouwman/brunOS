@@ -21,9 +21,12 @@ channels with `ingestion_mode ∈ {ingest-and-answer, digest-only}` are ingested
 and each must declare a `capture: {project, default_export}` routing block. Unknown
 or malformed entries FAIL CLOSED (skipped, logged). `redaction.exclude_people`
 (default true) applies the excluded-entities scrub; secrets are always scrubbed.
+Per-channel `allow_list` / `deny_list` (optional) further scope WHICH items are
+ingested by participant — e.g. a Gmail channel can deny a financial domain or allow
+only specific clients. deny WINS (fail-safe); an empty/omitted pair = no scoping.
 
-Source-dispatch seam: SOURCE_READERS maps a surface → reader. Slack is implemented;
-Gmail / WhatsApp / Telegram / meeting-transcript become small additions (a reader +
+Source-dispatch seam: SOURCE_READERS maps a surface → reader. Slack and Gmail are
+implemented; WhatsApp / Telegram / meeting-transcript become small additions (a reader +
 a SUPPORTED_SURFACES entry), no refactor.
 
 Idempotent: the per-channel watermark advances over everything scanned (incl.
@@ -82,9 +85,10 @@ COMMS_STATE_PATH = STATE_DIR / "comms-capture-cursors.json"  # {"channels": {"sl
 
 # Only these ingestion modes mean "extract durable knowledge from history".
 INGEST_MODES = {"ingest-and-answer", "digest-only"}
-# Surfaces this feeder can read today. The dispatch seam (SOURCE_READERS) is what
-# makes adding gmail / whatsapp / telegram / meeting-transcript a small change.
-SUPPORTED_SURFACES = {"slack"}
+# Surfaces this feeder can read today: slack and gmail. The dispatch seam
+# (SOURCE_READERS) is what makes adding whatsapp / telegram / meeting-transcript
+# a small change.
+SUPPORTED_SURFACES = {"slack", "gmail"}
 
 COMMS_DISTILL_SYSTEM_PROMPT = """You are the COMMS-CAPTURE pass for a second brain. You read a chat-channel transcript and extract ONLY durable, high-signal knowledge worth remembering. You are NOT a chatbot; you never reply to the messages.
 
@@ -236,10 +240,12 @@ def _exclude_people(cfg: dict) -> bool:
 
 
 # --- source-dispatch seam -----------------------------------------------------
-# A reader takes (channel_id, since_ts) and returns
+# A reader takes (channel_id, since_ts, cfg) and returns
 #   (entries, newest_ts) where entries = [(speaker_name, text, ts), ...] ascending.
-# Surface-specific concerns (client, username resolution) live inside the reader,
-# so _run() is surface-agnostic and trivially testable.
+# Surface-specific concerns (client, username resolution, participant-level scope
+# filtering) live inside the reader, so _run() is surface-agnostic and trivially
+# testable. `cfg` is the channel's registry entry — a reader reads its own optional
+# scope knobs from it (e.g. Gmail's allow_list/deny_list) and may ignore it.
 
 _CLIENTS: dict = {}
 
@@ -257,7 +263,34 @@ def _get_client(surface: str):
     return client
 
 
-def _slack_reader(channel_id: str, since: str | None):
+def _scope_lists(cfg: dict) -> tuple[list[str], list[str]]:
+    """Return (allow_list, deny_list) of lower-cased participant patterns.
+
+    Both are optional per-channel registry keys. Patterns match as case-insensitive
+    substrings against an email's participants (From/To/Cc), so a bare domain
+    ("bank.com") covers every address at it and a full address is an exact-ish match.
+    Non-list/garbage config → empty list (an empty deny_list denies nothing; an empty
+    allow_list allows all — so omitting both = no scoping, today's behavior).
+    """
+    def _norm(v):
+        return [str(x).strip().lower() for x in v if str(x).strip()] if isinstance(v, list) else []
+    return _norm(cfg.get("allow_list")), _norm(cfg.get("deny_list"))
+
+
+def _passes_scope(participants: str, allow: list[str], deny: list[str]) -> bool:
+    """deny WINS (fail-safe). Then, if an allow_list is set, a participant must
+    match it; an empty allow_list allows everything not denied."""
+    p = participants.lower()
+    if deny and any(d in p for d in deny):
+        return False
+    if allow and not any(a in p for a in allow):
+        return False
+    return True
+
+
+def _slack_reader(channel_id: str, since: str | None, cfg: dict):
+    # cfg unused for Slack today — participant scoping for Slack (by user id/name)
+    # can hang off the same allow_list/deny_list keys here when it's needed.
     from integrations import slack
 
     client = _get_client("slack")
@@ -266,14 +299,55 @@ def _slack_reader(channel_id: str, since: str | None):
     return entries, newest
 
 
-SOURCE_READERS = {"slack": _slack_reader}
+def _gmail_reader(channel_id: str, since: str | None, cfg: dict):
+    """Comms-capture reader for Gmail.
+
+    channel_id: a Gmail search query string (e.g. "in:sent", "label:SENT").
+                Passed directly to the Gmail API q= parameter.
+    since:      epoch seconds float string (same format as _cold_start_ts returns
+                and as Slack's fetch_channel_history returns). None on first run.
+    cfg:        the channel registry entry; allow_list/deny_list scope by participant.
+
+    Scope filtering is applied HERE (not in _run) because for sent/replied mail the
+    sender is always the brain owner — the meaningful identity is the RECIPIENTS,
+    which only the reader sees (From/To/Cc). A denied/out-of-scope email is dropped
+    from entries but STILL advances the cursor (we use fetch_since's newest_ms, which
+    covers everything scanned) so it is never re-fetched.
+
+    Returns (entries, newest) where:
+      entries  = [(from_addr, "Subject: <subj>\\n\\n<body_or_snippet>", str(ms))]
+      newest   = epoch seconds float string of the most recent email seen, or `since`
+                 when no emails found (cursor must not regress).
+    """
+    from integrations import gmail as gmail_mod
+
+    allow, deny = _scope_lists(cfg)
+    since_ms = int(float(since) * 1000) if since else None
+    emails, newest_ms = gmail_mod.fetch_since(channel_id, since_ms=since_ms)
+    entries = []
+    dropped = 0
+    for e in emails:
+        participants = f"{e.from_addr}\n{e.to_addr}\n{e.cc_addr}"
+        if not _passes_scope(participants, allow, deny):
+            dropped += 1
+            continue
+        entries.append(
+            (e.from_addr, f"Subject: {e.subject}\n\n{e.body_text or e.snippet}", str(e.internal_date_ms))
+        )
+    if dropped:
+        _log(f"    gmail {channel_id}: {dropped} email(s) dropped by allow/deny scope")
+    newest = f"{newest_ms / 1000:.6f}" if newest_ms is not None else since
+    return entries, newest
 
 
-def _read_channel(surface: str, channel_id: str, since: str | None):
+SOURCE_READERS = {"slack": _slack_reader, "gmail": _gmail_reader}
+
+
+def _read_channel(surface: str, channel_id: str, since: str | None, cfg: dict):
     reader = SOURCE_READERS.get(surface)
     if reader is None:  # pragma: no cover - guarded by SUPPORTED_SURFACES
         raise ValueError(f"unsupported surface: {surface!r}")
-    return reader(channel_id, since)
+    return reader(channel_id, since, cfg)
 
 
 # --- transcript + capture rendering -------------------------------------------
@@ -364,7 +438,7 @@ def _run(dry_run: bool, since_hours: int | None) -> dict:
         label = f"{cfg.get('name') or channel_id} ({key})"
 
         try:
-            entries, newest = _read_channel(surface, channel_id, since)
+            entries, newest = _read_channel(surface, channel_id, since, cfg)
         except Exception as e:  # noqa: BLE001 — one bad channel must not kill the run
             _log(f"  {key}: read failed ({type(e).__name__}: {e}); skipping, cursor held")
             errors += 1
