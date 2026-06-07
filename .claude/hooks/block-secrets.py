@@ -23,7 +23,13 @@ CREDENTIAL_PATH_PATTERNS = [
     r"(^|/)id_ecdsa(\.|$)",
     r"(^|/)credentials\.json$",
     r"(^|/)google_token\.json$",
-    r"(^|/)client_secrets?\.json$",
+    # Google OAuth client-secret file under any prefix/spelling. The old
+    # `(^|/)client_secrets?\.json$` only matched a bare `client_secret(s).json`
+    # and MISSED `google_client_secrets.json` (the name used across this repo)
+    # and `google-secrets.json` — both plaintext OAuth client_secret on disk.
+    # Surfaced by a LisaOS diagnose-brain run, 2026-06-07.
+    r"client_secrets?\.json$",
+    r"(^|/)google[-_][^/]*secret[^/]*\.json$",
     r"(^|/)\.aws/credentials",
     r"(^|/)\.aws/config",
     r"(^|/)\.ssh/",

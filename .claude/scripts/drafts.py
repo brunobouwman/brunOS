@@ -121,8 +121,15 @@ def expire_old_drafts(now_dt: datetime) -> list[Path]:
     expired_dir.mkdir(parents=True, exist_ok=True)
     cutoff = now_dt - timedelta(hours=EXPIRY_HOURS)
 
-    for path in sorted(active_dir.glob("*.md")):
-        if path.name.startswith("_"):
+    # rglob (not glob) so drafts nested in subdirectories of active/ (e.g.
+    # `active/protostack-baas/*.md`) also expire — top-level-only glob left
+    # them stuck in active/ forever. Surfaced by a LisaOS diagnose-brain run,
+    # 2026-06-07. The relative subpath is preserved under expired/ to keep
+    # provenance and avoid same-name collisions across subdirs.
+    for path in sorted(active_dir.rglob("*.md")):
+        rel = path.relative_to(active_dir)
+        if any(part.startswith("_") for part in rel.parts):
+            # skip _-prefixed files and meta subdirs (e.g. _archive/)
             continue
         try:
             text = path.read_text(encoding="utf-8")
@@ -136,7 +143,8 @@ def expire_old_drafts(now_dt: datetime) -> list[Path]:
             continue
         # Flip status to expired; atomic_write stamps `updated:`.
         new_text = _STATUS_RE.sub("status: expired", text, count=1)
-        dest = expired_dir / path.name
+        dest = expired_dir / rel
+        dest.parent.mkdir(parents=True, exist_ok=True)
         with file_lock(dest):
             atomic_write(dest, new_text)
         try:
