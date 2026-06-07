@@ -120,10 +120,18 @@ Invoked inside an individual brain (no `STANDARDS.md`), a persona returns
    call. The two personas are governed front-ends over that **same** run (run once,
    surface both slices) — they add tier resolution, the tier-scoped surface, and
    draft-only/internal-only delivery, never new extraction.
-4. **`company-consolidator`** — wrap the consolidation half of `company_brain_reflect.py`
-   (integrate cleared captures → durable memory + continuity). ⏸ next pass.
-5. **`company-standards-review`** — proposes `STANDARDS.md`/`DECISIONS.md` edits for
-   Full-tier approval; depends on accumulated Judge findings. ⏸ later.
+4. **`company-consolidator`** — ✅ built (base). Governed front-end over the **consumer loop
+   `linos_consumer.py`** (NOT `company_brain_reflect.py` — that's the digest layer; the
+   consumer is the integration engine: dual-gate read → `joint/` + `LINMEMORY.md` + acks).
+   Adds provenance-preservation, conflict-separation, decision-candidate flagging, fail-closed.
+5. **`company-standards-review`** — ✅ built (base). Net-new governance-maintenance judgment:
+   reads recurring `digests/judge/` findings + reversed decisions + `digests/gaps/`, **proposes**
+   `STANDARDS.md`/`DECISIONS.md` edits to `digests/standards-review/` for Full-tier approval.
+   Never rewrites governance directly; preserves superseded rules.
+
+**Persona set is COMPLETE** — all six personas from the spec are built (judge, query,
+leadership-digest, gap-analyst, consolidator, standards-review). Remaining is the shared
+plumbing (`personas.py`) + the onboarding-questionnaire-driven custom skills.
 5. **`personas.py`** — shared `load_persona` / `resolve_persona` /
    `persona_allowed_sources` / `persona_context` + access-policy tier parsing. Build
    **only once ≥2 personas need shared resolution** (the spec's guidance). The first two
