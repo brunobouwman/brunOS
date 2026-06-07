@@ -1,8 +1,8 @@
 [Unit]
-Description=brunoosbrain memory curation (daily-log distill + buffer drain + evict) — daily@08:00
+Description=brunoosbrain memory curation (daily-log distill + buffer drain + evict) — daily@07:00
 
 [Timer]
-OnCalendar=*-*-* 08:00:00 America/Sao_Paulo
+OnCalendar=*-*-* 07:00:00 America/Sao_Paulo
 Persistent=true
 Unit=brunoosbrain-reflect-curate.service
 
