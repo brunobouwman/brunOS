@@ -104,7 +104,7 @@ def test_select_channels_fail_closed():
         "slack:C_NOCAP": _chan(capture=None),                    # skip: no capture block
         "slack:C_NOEXPORT": _chan(capture={"project": "x"}),     # skip: incomplete capture
         "slack:C_BADEXPORT": _chan(capture={"project": "x", "default_export": "leak"}),  # skip: invalid export
-        "gmail:G1": _chan(surface="gmail"),                      # skip: unsupported surface (silent)
+        "whatsapp:W1": _chan(surface="whatsapp"),                  # skip: unsupported surface (silent)
         "slack:C_MISMATCH": _chan(surface="gmail"),              # skip: surface field != key prefix
         "badkey": _chan(),                                       # skip: no '<surface>:<id>'
         "slack:": _chan(),                                       # skip: empty id

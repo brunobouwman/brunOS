@@ -22,8 +22,8 @@ and each must declare a `capture: {project, default_export}` routing block. Unkn
 or malformed entries FAIL CLOSED (skipped, logged). `redaction.exclude_people`
 (default true) applies the excluded-entities scrub; secrets are always scrubbed.
 
-Source-dispatch seam: SOURCE_READERS maps a surface → reader. Slack is implemented;
-Gmail / WhatsApp / Telegram / meeting-transcript become small additions (a reader +
+Source-dispatch seam: SOURCE_READERS maps a surface → reader. Slack and Gmail are
+implemented; WhatsApp / Telegram / meeting-transcript become small additions (a reader +
 a SUPPORTED_SURFACES entry), no refactor.
 
 Idempotent: the per-channel watermark advances over everything scanned (incl.
@@ -82,9 +82,10 @@ COMMS_STATE_PATH = STATE_DIR / "comms-capture-cursors.json"  # {"channels": {"sl
 
 # Only these ingestion modes mean "extract durable knowledge from history".
 INGEST_MODES = {"ingest-and-answer", "digest-only"}
-# Surfaces this feeder can read today. The dispatch seam (SOURCE_READERS) is what
-# makes adding gmail / whatsapp / telegram / meeting-transcript a small change.
-SUPPORTED_SURFACES = {"slack"}
+# Surfaces this feeder can read today: slack and gmail. The dispatch seam
+# (SOURCE_READERS) is what makes adding whatsapp / telegram / meeting-transcript
+# a small change.
+SUPPORTED_SURFACES = {"slack", "gmail"}
 
 COMMS_DISTILL_SYSTEM_PROMPT = """You are the COMMS-CAPTURE pass for a second brain. You read a chat-channel transcript and extract ONLY durable, high-signal knowledge worth remembering. You are NOT a chatbot; you never reply to the messages.
 
@@ -266,7 +267,36 @@ def _slack_reader(channel_id: str, since: str | None):
     return entries, newest
 
 
-SOURCE_READERS = {"slack": _slack_reader}
+def _gmail_reader(channel_id: str, since: str | None):
+    """Comms-capture reader for Gmail.
+
+    channel_id: a Gmail search query string (e.g. "in:sent", "label:SENT").
+                Passed directly to the Gmail API q= parameter.
+    since:      epoch seconds float string (same format as _cold_start_ts returns
+                and as Slack's fetch_channel_history returns). None on first run.
+
+    Returns (entries, newest) where:
+      entries  = [(from_addr, "Subject: <subj>\\n\\n<body_or_snippet>", str(ms))]
+      newest   = epoch seconds float string of the most recent email seen, or `since`
+                 when no emails found (cursor must not regress).
+    """
+    from integrations import gmail as gmail_mod
+
+    since_ms = int(float(since) * 1000) if since else None
+    emails, newest_ms = gmail_mod.fetch_since(channel_id, since_ms=since_ms)
+    entries = [
+        (
+            e.from_addr,
+            f"Subject: {e.subject}\n\n{e.body_text or e.snippet}",
+            str(e.internal_date_ms),
+        )
+        for e in emails
+    ]
+    newest = f"{newest_ms / 1000:.6f}" if newest_ms is not None else since
+    return entries, newest
+
+
+SOURCE_READERS = {"slack": _slack_reader, "gmail": _gmail_reader}
 
 
 def _read_channel(surface: str, channel_id: str, since: str | None):
