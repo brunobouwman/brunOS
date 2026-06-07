@@ -422,18 +422,125 @@ def _split_memory(text: str) -> tuple[str, str]:
     return m.group(1), m.group(2)
 
 
-def _append_promotions(memory_text: str, items: list[dict]) -> str:
-    """Append promoted items under their section headers in MEMORY.md."""
+# Write-time MEMORY.md gates (both confirmed best-practice — June 2026 competitive
+# survey / Mem0): a semantic dedup gate (skip a bullet whose meaning already lives
+# in MEMORY.md) and a provenance annotation (record each bullet's source slug).
+# Threshold env-overridable; 0.95 is Mem0's near-duplicate cosine gate.
+DEDUP_COSINE_THRESHOLD = float(os.environ.get("BRUNOS_MEMORY_DEDUP_THRESHOLD", "0.95"))
+# Strip a MEMORY.md bullet down to its semantic text for dedup comparison: drop the
+# leading "- **YYYY-MM-DD** —" chrome and any trailing "<!-- src: ... -->" comment.
+_BULLET_PREFIX_RE = re.compile(r"^\s*-\s+(?:\*\*\d{4}-\d{2}-\d{2}\*\*\s*—\s*)?")
+_SRC_COMMENT_RE = re.compile(r"\s*<!--\s*src:.*?-->\s*$")
+
+
+def _bullet_semantic_text(line: str) -> str:
+    """A MEMORY.md bullet line → just its meaning (no date prefix / src comment)."""
+    return _BULLET_PREFIX_RE.sub("", _SRC_COMMENT_RE.sub("", line)).strip()
+
+
+def _embed_texts(texts: list[str]) -> list:
+    """Passage-embed `texts` for the dedup gate.
+
+    Symmetric on purpose: the candidate bullet AND the existing MEMORY.md bullets
+    are both embedded as *passages*, so near-identical text scores cosine ≈ 1.0 and
+    the 0.95 gate is meaningful. (The asymmetric embed_query/passage split that
+    memory_search.py uses would keep even identical text well under 0.95.) Isolated
+    as a seam so tests can patch it without loading FastEmbed.
+    """
+    from embeddings import embed_passages
+
+    return embed_passages(texts)
+
+
+def _cosine(a, b) -> float:
+    import numpy as np
+
+    a = np.asarray(a, dtype="float32")
+    b = np.asarray(b, dtype="float32")
+    na = float(np.linalg.norm(a))
+    nb = float(np.linalg.norm(b))
+    if na == 0.0 or nb == 0.0:
+        return 0.0
+    return float(np.dot(a, b) / (na * nb))
+
+
+def _dedup_promotions(
+    memory_text: str, items: list[dict]
+) -> tuple[list[dict], list[dict]]:
+    """Split `items` into (kept, skipped) by a ≥ DEDUP_COSINE_THRESHOLD cosine gate.
+
+    A candidate is skipped when its passage embedding is ≥ the threshold to ANY
+    existing MEMORY.md bullet OR to an already-kept candidate this run (so two
+    near-dup buffered items can't both land). Each skipped entry carries a
+    `similarity` field for logging / dry-run. Fail-open: if embedding is unavailable
+    the gate is a no-op (everything kept) — dedup is a cap-hygiene optimization,
+    never a barrier to durable knowledge.
+    """
     if not items:
-        return memory_text
+        return [], []
+    existing = [
+        t
+        for t in (
+            _bullet_semantic_text(ln)
+            for ln in memory_text.splitlines()
+            if ln.lstrip().startswith("- ")
+        )
+        if t
+    ]
+    cand_texts = [item["text"].rstrip() for item in items]
+    try:
+        vecs = _embed_texts(existing + cand_texts)
+    except Exception as e:
+        _log(
+            f"  curation: dedup embedding unavailable ({type(e).__name__}: {e}); "
+            "appending all (fail-open)"
+        )
+        return list(items), []
+    ref_vecs = list(vecs[: len(existing)])  # grows with accepted candidates
+    cand_vecs = vecs[len(existing):]
+    kept: list[dict] = []
+    skipped: list[dict] = []
+    for item, cvec in zip(items, cand_vecs):
+        sim = max((_cosine(cvec, rv) for rv in ref_vecs), default=0.0)
+        if sim >= DEDUP_COSINE_THRESHOLD:
+            skipped.append({**item, "similarity": round(sim, 4)})
+            _log(f"  curation: skip near-dup (cos={sim:.3f}) — {item['text'][:60]!r}")
+            continue
+        kept.append(item)
+        ref_vecs.append(cvec)
+    return kept, skipped
+
+
+def _append_promotions(
+    memory_text: str, items: list[dict]
+) -> tuple[str, list[dict]]:
+    """Append promoted items under their section headers in MEMORY.md.
+
+    Two write-time gates (both confirmed best-practice — June 2026 survey):
+      • Semantic dedup — a bullet whose meaning already lives in MEMORY.md (cosine
+        ≥ DEDUP_COSINE_THRESHOLD to an existing bullet or an earlier kept item this
+        run) is skipped, so overlapping captures don't silently burn the 8KB cap.
+      • Provenance — each appended bullet carries a trailing `<!-- src: <slug> -->`
+        recording the capture/source it was distilled from (compression lineage).
+
+    Returns (new_text, skipped) where `skipped` is the near-dup items dropped (each
+    with a `similarity` field), surfaced by the curation stage's logs + dry-run.
+    """
+    if not items:
+        return memory_text, []
+    kept, skipped = _dedup_promotions(memory_text, items)
+    if not kept:
+        return memory_text, skipped
     fm, body = _split_memory(memory_text)
     today = now_brt().strftime("%Y-%m-%d")
 
-    for item in items:
+    for item in kept:
         section = SECTION_HEADERS.get(item["type"])
         if section is None:
             continue
-        bullet = f"\n- **{today}** — {item['text'].rstrip()}"
+        src = str(item.get("source") or "").strip()
+        provenance = f"  <!-- src: {src} -->" if src else ""
+        bullet = f"\n- **{today}** — {item['text'].rstrip()}{provenance}"
         # Insert after the section header's first blank line.
         idx = body.find(section)
         if idx < 0:
@@ -451,7 +558,7 @@ def _append_promotions(memory_text: str, items: list[dict]) -> str:
         tail = body[insert_at:]
         body = head + bullet + "\n\n" + tail.lstrip("\n")
 
-    return fm + body
+    return fm + body, skipped
 
 
 def _surface_soul_suggestions(items: list[dict]) -> None:
@@ -1395,6 +1502,11 @@ def _run_memory_curation_stage(dry_run: bool) -> tuple[int, list[str]]:
     across the day (no per-batch churn) and durable items are never silently
     squeezed: over-cap bullets move to Memory/_archive/MEMORY-archive.md.
 
+    The drain runs through _append_promotions's two write-time gates: a semantic
+    dedup gate (skip a buffered bullet already ≥ DEDUP_COSINE_THRESHOLD cosine to an
+    existing MEMORY.md bullet — so overlapping captures don't burn the cap) and a
+    `<!-- src: <slug> -->` provenance annotation per appended bullet.
+
     Returns (rc, fails); fails ⊆ {curate_memory_over_cap}. The buffer is cleared
     only after a successful (non-dry) write.
     """
@@ -1407,34 +1519,49 @@ def _run_memory_curation_stage(dry_run: bool) -> tuple[int, list[str]]:
     if not isinstance(buf, list):
         buf = []
     appendable = [
-        {"type": it.get("type", ""), "text": it.get("text", "")}
+        {
+            "type": it.get("type", ""),
+            "text": it.get("text", ""),
+            "source": it.get("source", ""),
+        }
         for it in buf
         if it.get("text")
     ]
 
     memory_path = vault_path() / MEMORY_REL
     memory_text = _read_text(memory_path)
-    new_mem = _append_promotions(memory_text, appendable) if appendable else memory_text
+    if appendable:
+        new_mem, skipped = _append_promotions(memory_text, appendable)
+    else:
+        new_mem, skipped = memory_text, []
+    appended_n = len(appendable) - len(skipped)
     new_mem, evicted, over_cap = _evict_to_archive_if_over_cap(new_mem, dry_run=dry_run)
 
     if dry_run:
         sys.stdout.write(json.dumps({
             "buffered_items": len(appendable),
+            "would_append": appended_n,
+            "would_skip_dupes": [
+                {"text": s["text"], "similarity": s.get("similarity")} for s in skipped
+            ],
             "would_evict": [f"[{h}] {b}" for h, b in evicted],
             "still_over_cap": over_cap,
         }, indent=2, ensure_ascii=False))
         sys.stdout.write("\n")
-        _log(f"  curation dry-run: {len(appendable)} buffered, "
-             f"{len(evicted)} would-evict; no writes")
+        _log(f"  curation dry-run: {len(appendable)} buffered, {appended_n} would-append, "
+             f"{len(skipped)} dup-skip, {len(evicted)} would-evict; no writes")
         return 0, []
 
-    if appendable or evicted:
+    if appended_n or evicted:
         with file_lock(memory_path):
             atomic_write(memory_path, new_mem)
         _log(
-            f"  curation: appended {len(appendable)} item(s), evicted {len(evicted)} "
-            f"to archive; MEMORY.md now {len(new_mem.encode('utf-8'))}B"
+            f"  curation: appended {appended_n} item(s) ({len(skipped)} dup-skipped), "
+            f"evicted {len(evicted)} to archive; "
+            f"MEMORY.md now {len(new_mem.encode('utf-8'))}B"
         )
+    elif skipped:
+        _log(f"  curation: all {len(skipped)} buffered item(s) were near-dups; nothing appended")
     else:
         _log("  curation: buffer empty + MEMORY.md under cap; no-op")
 
