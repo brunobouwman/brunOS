@@ -177,7 +177,7 @@ def test_run_writes_capture_and_advances_cursor():
     with tempfile.TemporaryDirectory() as td:
         vault, state, base = _run_ctx(
             td, overrides=dict(_DEFAULT_OVERRIDES),
-            read=lambda s, cid, since: ([("Lisa", "ship it", "1700000002.0")], "1700000002.000000"),
+            read=lambda s, cid, since, cfg: ([("Lisa", "ship it", "1700000002.0")], "1700000002.000000"),
             distill=lambda t: DISTILL_MD,
         )
         # write_inbox_capture resolves shared.vault_path() internally → patch it too.
@@ -205,7 +205,7 @@ def test_run_none_advances_cursor_no_capture():
     with tempfile.TemporaryDirectory() as td:
         vault, state, base = _run_ctx(
             td, overrides=dict(_DEFAULT_OVERRIDES),
-            read=lambda s, cid, since: ([("Lisa", "lol ok", "1700000003.0")], "1700000003.000000"),
+            read=lambda s, cid, since, cfg: ([("Lisa", "lol ok", "1700000003.0")], "1700000003.000000"),
             distill=lambda t: "NONE",
         )
         orig_vp = shared.vault_path
@@ -228,7 +228,7 @@ def test_run_distill_failure_holds_cursor():
     with tempfile.TemporaryDirectory() as td:
         vault, state, base = _run_ctx(
             td, overrides=dict(_DEFAULT_OVERRIDES),
-            read=lambda s, cid, since: ([("Lisa", "important fact", "1700000004.0")], "1700000004.000000"),
+            read=lambda s, cid, since, cfg: ([("Lisa", "important fact", "1700000004.0")], "1700000004.000000"),
             distill=_boom,
         )
         orig_vp = shared.vault_path
@@ -252,7 +252,7 @@ def test_run_min_messages_skip_no_distill():
         ov["comms_capture.min_messages"] = 3
         vault, state, base = _run_ctx(
             td, overrides=ov,
-            read=lambda s, cid, since: ([("Lisa", "a", "1.0"), ("Bob", "b", "2.000000")], "2.000000"),
+            read=lambda s, cid, since, cfg: ([("Lisa", "a", "1.0"), ("Bob", "b", "2.000000")], "2.000000"),
             distill=_must_not_distill,
         )
         with _patch(**base):
@@ -268,7 +268,7 @@ def test_run_scrubs_excluded_and_secrets():
     with tempfile.TemporaryDirectory() as td:
         vault, state, base = _run_ctx(
             td, overrides=dict(_DEFAULT_OVERRIDES),
-            read=lambda s, cid, since: ([("Lisa", "see notes", "1700000005.0")], "1700000005.000000"),
+            read=lambda s, cid, since, cfg: ([("Lisa", "see notes", "1700000005.0")], "1700000005.000000"),
             distill=lambda t: leaky,
             excluded=frozenset({"Mallory"}),
         )
@@ -320,7 +320,7 @@ def test_dry_run_writes_nothing():
     with tempfile.TemporaryDirectory() as td:
         vault, state, base = _run_ctx(
             td, overrides=dict(_DEFAULT_OVERRIDES),
-            read=lambda s, cid, since: ([("Lisa", "ship it", "1700000006.0")], "1700000006.000000"),
+            read=lambda s, cid, since, cfg: ([("Lisa", "ship it", "1700000006.0")], "1700000006.000000"),
             distill=lambda t: DISTILL_MD,
         )
         orig_vp = shared.vault_path

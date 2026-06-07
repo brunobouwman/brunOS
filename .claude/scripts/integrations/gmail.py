@@ -47,6 +47,8 @@ class EmailMessage:
     internal_date_ms: int   # Gmail internalDate, Unix ms
     body_text: str          # text/plain body (may be truncated)
     snippet: str            # Gmail API snippet (fallback when body_text is empty)
+    to_addr: str = ""       # raw To header (for participant allow/deny scoping)
+    cc_addr: str = ""       # raw Cc header (for participant allow/deny scoping)
 
 
 def _svc():
@@ -62,7 +64,15 @@ def _header(headers: list[dict], name: str) -> str:
 
 
 def _extract_body_text(payload: dict, max_chars: int = 4000) -> str:
-    """Recursively extract the first text/plain body from a Gmail format=full payload."""
+    """Recursively extract the first text/plain body from a Gmail format=full payload.
+
+    LIMITATION: text/plain only. An HTML-only email (no text/plain alternative part)
+    yields "" here, and the comms-capture reader falls back to the ~200-char Gmail
+    snippet for distillation. Multipart/alternative mail (most clients, incl. Gmail's
+    own compose) carries a text/plain part, so sent/replied threads are unaffected;
+    pure-HTML senders (newsletters, some marketing mail) lose body content. If HTML
+    senders ever become a meaningful capture source, add an HTML→text fallback here.
+    """
     mime_type = (payload.get("mimeType") or "")
     if mime_type == "text/plain":
         data = (payload.get("body") or {}).get("data", "") or ""
@@ -123,14 +133,23 @@ def recent(hours: int, max_results: int = 50) -> list[EmailHeader]:
 def fetch_since(
     query: str,
     since_ms: int | None = None,
-    max_results: int = 50,
+    max_results: int = 100,
     max_body_chars: int = 4000,
+    max_messages: int = 500,
 ) -> tuple[list[EmailMessage], int | None]:
     """Stateless body-fetch: emails matching `query` newer than since_ms.
 
     `query` is any valid Gmail search string (e.g. "in:sent", "label:SENT").
     `since_ms` is the exclusive lower bound as a Unix timestamp in milliseconds
-    (Gmail internalDate format). None = no lower bound (rely on max_results).
+    (Gmail internalDate format). None = no lower bound (rely on max_messages).
+    `max_results` is the per-page list size; `max_messages` bounds the total
+    kept across pages (mirrors slack.fetch_channel_history's max_messages cap).
+
+    PAGINATES via nextPageToken so a busy window (or a long cold-start lookback)
+    is fully covered instead of silently truncating at one page — without this,
+    a cursor that advances to the newest-seen message would skip every message
+    older than the page cap. Bounded by max_messages as a runaway guard; daily
+    sent/replied volume is far below it.
 
     Returns (emails_ascending_by_internalDate, newest_internal_date_ms_or_None).
     NEVER writes state — the caller owns the cursor.
@@ -142,38 +161,50 @@ def fetch_since(
     if since_ms:
         since_epoch_s = since_ms // 1000
         full_query = f"{query} after:{since_epoch_s}"
-    listing = svc.users().messages().list(
-        userId="me", q=full_query, maxResults=max_results
-    ).execute()
-    stubs = listing.get("messages") or []
+
     out: list[EmailMessage] = []
-    for stub in stubs:
-        try:
-            full = svc.users().messages().get(
-                userId="me",
-                id=stub["id"],
-                format="full",
-            ).execute()
-        except Exception as e:
-            print(f"[gmail] get {stub.get('id')} failed: {e}", file=sys.stderr)
-            continue
-        internal_date_ms = int(full.get("internalDate") or 0)
-        # Strict inequality: skip messages at or before the watermark
-        if since_ms and internal_date_ms <= since_ms:
-            continue
-        payload = full.get("payload") or {}
-        headers = payload.get("headers") or []
-        body_text = _extract_body_text(payload, max_body_chars)
-        out.append(EmailMessage(
-            id=full.get("id", stub["id"]),
-            thread_id=full.get("threadId", ""),
-            from_addr=_header(headers, "From"),
-            subject=_header(headers, "Subject"),
-            date_iso=_header(headers, "Date"),
-            internal_date_ms=internal_date_ms,
-            body_text=body_text,
-            snippet=full.get("snippet") or "",
-        ))
+    page_token: str | None = None
+    while True:
+        kwargs = {"userId": "me", "q": full_query, "maxResults": max_results}
+        if page_token:
+            kwargs["pageToken"] = page_token
+        listing = svc.users().messages().list(**kwargs).execute()
+        stubs = listing.get("messages") or []
+        for stub in stubs:
+            try:
+                full = svc.users().messages().get(
+                    userId="me",
+                    id=stub["id"],
+                    format="full",
+                ).execute()
+            except Exception as e:
+                print(f"[gmail] get {stub.get('id')} failed: {e}", file=sys.stderr)
+                continue
+            internal_date_ms = int(full.get("internalDate") or 0)
+            # Strict inequality: skip messages at or before the watermark. The
+            # `after:` operator is second-granular and inclusive, so this ms-level
+            # backstop is what makes the watermark exact.
+            if since_ms and internal_date_ms <= since_ms:
+                continue
+            payload = full.get("payload") or {}
+            headers = payload.get("headers") or []
+            body_text = _extract_body_text(payload, max_body_chars)
+            out.append(EmailMessage(
+                id=full.get("id", stub["id"]),
+                thread_id=full.get("threadId", ""),
+                from_addr=_header(headers, "From"),
+                subject=_header(headers, "Subject"),
+                date_iso=_header(headers, "Date"),
+                internal_date_ms=internal_date_ms,
+                body_text=body_text,
+                snippet=full.get("snippet") or "",
+                to_addr=_header(headers, "To"),
+                cc_addr=_header(headers, "Cc"),
+            ))
+        page_token = listing.get("nextPageToken") or None
+        if not page_token or len(out) >= max_messages:
+            break
+
     out.sort(key=lambda e: e.internal_date_ms)
     newest_ms = max((e.internal_date_ms for e in out), default=None)
     return out, newest_ms

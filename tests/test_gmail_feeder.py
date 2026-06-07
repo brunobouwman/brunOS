@@ -137,6 +137,11 @@ class _FakeGmailSvc:
         self._gets: dict[str, dict] = {}
         self._raise_ids: set[str] = set()
         self._pending: tuple | None = None
+        # Pagination: each tuple is (messages, next_page_token). When set, list()
+        # walks these in order keyed by the pageToken it receives. When empty,
+        # falls back to the single-page _list_msgs (no nextPageToken).
+        self._pages: list[tuple[list[dict], str | None]] = []
+        self.list_page_tokens: list = []  # pageToken seen on each list() call
 
     # --- chaining ---
 
@@ -145,7 +150,8 @@ class _FakeGmailSvc:
 
     def list(self, **kwargs):
         self.last_list_q = kwargs.get("q")
-        self._pending = ("list",)
+        self.list_page_tokens.append(kwargs.get("pageToken"))
+        self._pending = ("list", kwargs.get("pageToken"))
         return self
 
     def get(self, **kwargs):
@@ -156,6 +162,11 @@ class _FakeGmailSvc:
         assert self._pending is not None, "_pending not set before execute()"
         kind = self._pending[0]
         if kind == "list":
+            if self._pages:
+                token = self._pending[1]
+                idx = 0 if token is None else int(token)
+                msgs, nxt = self._pages[idx]
+                return {"messages": msgs, "nextPageToken": nxt} if nxt else {"messages": msgs}
             return {"messages": self._list_msgs}
         else:  # "get"
             msg_id = self._pending[1]
@@ -186,7 +197,17 @@ def _make_full_message(
     internal_date_ms: int = 1749204000000,
     body_text: str = "Message body",
     snippet: str = "Message body",
+    to_addr: str = "me@example.com",
+    cc_addr: str = "",
 ) -> dict:
+    headers = [
+        {"name": "From", "value": from_addr},
+        {"name": "Subject", "value": subject},
+        {"name": "Date", "value": date_iso},
+        {"name": "To", "value": to_addr},
+    ]
+    if cc_addr:
+        headers.append({"name": "Cc", "value": cc_addr})
     return {
         "id": msg_id,
         "threadId": thread_id,
@@ -194,11 +215,7 @@ def _make_full_message(
         "snippet": snippet,
         "payload": {
             "mimeType": "text/plain",
-            "headers": [
-                {"name": "From", "value": from_addr},
-                {"name": "Subject", "value": subject},
-                {"name": "Date", "value": date_iso},
-            ],
+            "headers": headers,
             "body": {"data": _b64(body_text)},
         },
     }
@@ -349,6 +366,66 @@ def test_fetch_since_individual_get_failure():
     check(emails[0].id == "M_OK", f"successful message is returned ({emails[0].id})")
 
 
+def test_fetch_since_paginates_across_pages():
+    print("[test_fetch_since_paginates_across_pages]")
+    # THE BUG FIX: >1 page of results must ALL be fetched, not silently truncated
+    # to the first page (which would let the cursor leap past unprocessed mail).
+    svc = _FakeGmailSvc()
+    svc._pages = [
+        ([{"id": "P0a"}, {"id": "P0b"}], "1"),   # page 0 → nextPageToken "1"
+        ([{"id": "P1a"}, {"id": "P1b"}], "2"),   # page 1 → nextPageToken "2"
+        ([{"id": "P2a"}], None),                  # page 2 → last page
+    ]
+    base = 1749204000000
+    for i, mid in enumerate(["P0a", "P0b", "P1a", "P1b", "P2a"]):
+        svc._gets[mid] = _make_full_message(mid, internal_date_ms=base + i * 1000)
+
+    with _patch_gmail(_svc=lambda: svc):
+        emails, newest_ms = gmail.fetch_since("in:sent")
+
+    ids = {e.id for e in emails}
+    check(ids == {"P0a", "P0b", "P1a", "P1b", "P2a"},
+          f"all 5 messages across 3 pages returned ({sorted(ids)})")
+    check(svc.list_page_tokens == [None, "1", "2"],
+          f"followed nextPageToken each page ({svc.list_page_tokens})")
+    check(newest_ms == base + 4000, f"newest_ms across all pages ({newest_ms})")
+
+
+def test_fetch_since_respects_max_messages_cap():
+    print("[test_fetch_since_respects_max_messages_cap]")
+    # Runaway guard: stop walking pages once max_messages kept (mirrors Slack).
+    svc = _FakeGmailSvc()
+    svc._pages = [
+        ([{"id": "A"}, {"id": "B"}], "1"),
+        ([{"id": "C"}, {"id": "D"}], "2"),   # should NOT be requested once cap hit
+    ]
+    base = 1749204000000
+    for i, mid in enumerate(["A", "B", "C", "D"]):
+        svc._gets[mid] = _make_full_message(mid, internal_date_ms=base + i * 1000)
+
+    with _patch_gmail(_svc=lambda: svc):
+        emails, _ = gmail.fetch_since("in:sent", max_messages=2)
+
+    check(len(emails) == 2, f"stopped at max_messages=2 ({len(emails)})")
+    check(svc.list_page_tokens == [None], f"second page not requested ({svc.list_page_tokens})")
+
+
+def test_fetch_since_captures_to_and_cc():
+    print("[test_fetch_since_captures_to_and_cc]")
+    svc = _FakeGmailSvc()
+    svc._list_msgs = [{"id": "M1"}]
+    svc._gets["M1"] = _make_full_message(
+        "M1", internal_date_ms=1749204050000,
+        to_addr="client@acme.com", cc_addr="lisa@protostack.io",
+    )
+
+    with _patch_gmail(_svc=lambda: svc):
+        emails, _ = gmail.fetch_since("in:sent")
+
+    check(emails[0].to_addr == "client@acme.com", f"To header captured ({emails[0].to_addr!r})")
+    check(emails[0].cc_addr == "lisa@protostack.io", f"Cc header captured ({emails[0].cc_addr!r})")
+
+
 # ===========================================================================
 # Group C — _gmail_reader tests (gmail.fetch_since patched)
 # ===========================================================================
@@ -368,6 +445,8 @@ class _FakeEmailMessage:
     internal_date_ms: int = 1749204050000
     body_text: str = "See notes"
     snippet: str = ""
+    to_addr: str = "me@example.com"
+    cc_addr: str = ""
 
 
 def _patch_gmail_fetch_since(stub_fn):
@@ -396,7 +475,7 @@ def test_gmail_reader_since_none_cold_start():
     orig = _gmail_integration.fetch_since
     _gmail_integration.fetch_since = _fake_fetch
     try:
-        cc._gmail_reader("in:sent", None)
+        cc._gmail_reader("in:sent", None, {})
     finally:
         _gmail_integration.fetch_since = orig
 
@@ -415,7 +494,7 @@ def test_gmail_reader_since_seconds_to_ms():
     orig = _gmail_integration.fetch_since
     _gmail_integration.fetch_since = _fake_fetch
     try:
-        cc._gmail_reader("in:sent", "1749204000.000000")
+        cc._gmail_reader("in:sent", "1749204000.000000", {})
     finally:
         _gmail_integration.fetch_since = orig
 
@@ -436,7 +515,7 @@ def test_gmail_reader_entries_format():
     orig = _gmail_integration.fetch_since
     _gmail_integration.fetch_since = _fake_fetch
     try:
-        entries, newest = cc._gmail_reader("in:sent", None)
+        entries, newest = cc._gmail_reader("in:sent", None, {})
     finally:
         _gmail_integration.fetch_since = orig
 
@@ -460,7 +539,7 @@ def test_gmail_reader_snippet_fallback():
     orig = _gmail_integration.fetch_since
     _gmail_integration.fetch_since = _fake_fetch
     try:
-        entries, _ = cc._gmail_reader("in:sent", None)
+        entries, _ = cc._gmail_reader("in:sent", None, {})
     finally:
         _gmail_integration.fetch_since = orig
 
@@ -480,7 +559,7 @@ def test_gmail_reader_newest_as_seconds():
     orig = _gmail_integration.fetch_since
     _gmail_integration.fetch_since = _fake_fetch
     try:
-        _, newest = cc._gmail_reader("in:sent", None)
+        _, newest = cc._gmail_reader("in:sent", None, {})
     finally:
         _gmail_integration.fetch_since = orig
 
@@ -498,12 +577,80 @@ def test_gmail_reader_newest_when_no_emails():
     orig = _gmail_integration.fetch_since
     _gmail_integration.fetch_since = _fake_fetch
     try:
-        _, newest = cc._gmail_reader("in:sent", "1749204000.000000")
+        _, newest = cc._gmail_reader("in:sent", "1749204000.000000", {})
     finally:
         _gmail_integration.fetch_since = orig
 
     check(newest == "1749204000.000000",
           f"cursor does not regress when no emails found ({newest!r})")
+
+
+# --- allow_list / deny_list participant scoping -------------------------------
+
+def _reader_with_emails(emails, newest_ms, cfg):
+    """Run _gmail_reader with fetch_since stubbed to return `emails`."""
+    def _fake_fetch(query, since_ms=None, **kw):
+        return emails, newest_ms
+
+    import integrations.gmail as _gmail_integration
+    orig = _gmail_integration.fetch_since
+    _gmail_integration.fetch_since = _fake_fetch
+    try:
+        return cc._gmail_reader("in:sent", None, cfg)
+    finally:
+        _gmail_integration.fetch_since = orig
+
+
+def test_scope_unit():
+    print("[test_scope_unit]")
+    # deny WINS even if allow also matches
+    check(cc._passes_scope("a@bank.com", ["bank.com"], ["bank.com"]) is False,
+          "deny wins over allow")
+    check(cc._passes_scope("a@acme.com", [], []) is True, "no lists → allow all")
+    check(cc._passes_scope("a@acme.com", ["acme.com"], []) is True, "allow match → pass")
+    check(cc._passes_scope("a@other.com", ["acme.com"], []) is False,
+          "allow set + no match → drop")
+    check(cc._passes_scope("a@bank.com", [], ["bank.com"]) is False, "deny match → drop")
+    check(cc._passes_scope("a@ACME.com", ["acme.com"], []) is True, "case-insensitive")
+
+
+def test_gmail_reader_deny_list_drops_recipient():
+    print("[test_gmail_reader_deny_list_drops_recipient]")
+    keep = _FakeEmailMessage(id="K", to_addr="client@acme.com", subject="Work")
+    drop = _FakeEmailMessage(id="D", to_addr="statements@bank.com", subject="Statement")
+    entries, _ = _reader_with_emails([keep, drop], 1749204050000,
+                                     {"deny_list": ["bank.com"]})
+    check(len(entries) == 1, f"denied recipient dropped ({len(entries)})")
+    check("Work" in entries[0][1], "kept email is the in-scope one")
+
+
+def test_gmail_reader_allow_list_keeps_only_matches():
+    print("[test_gmail_reader_allow_list_keeps_only_matches]")
+    a = _FakeEmailMessage(id="A", to_addr="client@acme.com", subject="Acme")
+    b = _FakeEmailMessage(id="B", to_addr="someone@random.com", subject="Random")
+    entries, _ = _reader_with_emails([a, b], 1749204050000,
+                                     {"allow_list": ["acme.com"]})
+    check(len(entries) == 1, f"only allow-listed recipient kept ({len(entries)})")
+    check("Acme" in entries[0][1], "the allow-listed email survived")
+
+
+def test_gmail_reader_scope_drop_still_advances_cursor():
+    print("[test_gmail_reader_scope_drop_still_advances_cursor]")
+    # All emails denied → entries empty, but cursor must advance to fetch_since's
+    # newest so denied mail is never re-scanned.
+    drop = _FakeEmailMessage(id="D", to_addr="x@bank.com", internal_date_ms=1749204050000)
+    entries, newest = _reader_with_emails([drop], 1749204050000, {"deny_list": ["bank.com"]})
+    check(entries == [], "all emails dropped by deny")
+    check(newest == "1749204050.000000",
+          f"cursor still advances past denied mail ({newest!r})")
+
+
+def test_gmail_reader_scope_matches_cc_and_from():
+    print("[test_gmail_reader_scope_matches_cc_and_from]")
+    # deny matches on Cc participant, not just To
+    via_cc = _FakeEmailMessage(id="C", to_addr="ok@acme.com", cc_addr="audit@bank.com")
+    entries, _ = _reader_with_emails([via_cc], 1749204050000, {"deny_list": ["bank.com"]})
+    check(entries == [], "deny matches a Cc participant")
 
 
 # ===========================================================================
@@ -602,7 +749,7 @@ def test_gmail_run_writes_capture():
     with tempfile.TemporaryDirectory() as td:
         vault, state, base = _run_ctx_gmail(
             td, overrides=dict(_GMAIL_DEFAULT_OVERRIDES),
-            read=lambda s, cid, since: (
+            read=lambda s, cid, since, cfg: (
                 [("bob@x.com", "Subject: Ship it\n\nlets go", "1749204050000")],
                 "1749204050.000000",
             ),
@@ -634,7 +781,7 @@ def test_gmail_run_cursor_advances_to_seconds_format():
     with tempfile.TemporaryDirectory() as td:
         vault, state, base = _run_ctx_gmail(
             td, overrides=dict(_GMAIL_DEFAULT_OVERRIDES),
-            read=lambda s, cid, since: (
+            read=lambda s, cid, since, cfg: (
                 [("bob@x.com", "Subject: Foo\n\nbar", "1749204050000")],
                 "1749204050.000000",
             ),
@@ -657,7 +804,7 @@ def test_gmail_run_cursor_advances_to_seconds_format():
 def test_gmail_run_read_failure_holds_cursor():
     print("[test_gmail_run_read_failure_holds_cursor]")
 
-    def _boom(s, cid, since):
+    def _boom(s, cid, since, cfg):
         raise RuntimeError("gmail down")
 
     with tempfile.TemporaryDirectory() as td:
@@ -684,7 +831,7 @@ def test_gmail_run_none_advances_cursor():
     with tempfile.TemporaryDirectory() as td:
         vault, state, base = _run_ctx_gmail(
             td, overrides=dict(_GMAIL_DEFAULT_OVERRIDES),
-            read=lambda s, cid, since: (
+            read=lambda s, cid, since, cfg: (
                 [("bob@x.com", "Subject: Hi\n\nhey", "1749204060000")],
                 "1749204060.000000",
             ),
@@ -726,6 +873,9 @@ def main():
     test_fetch_since_strict_watermark_filtering()
     test_fetch_since_empty_result()
     test_fetch_since_individual_get_failure()
+    test_fetch_since_paginates_across_pages()
+    test_fetch_since_respects_max_messages_cap()
+    test_fetch_since_captures_to_and_cc()
 
     # Group C
     test_gmail_reader_since_none_cold_start()
@@ -734,6 +884,11 @@ def main():
     test_gmail_reader_snippet_fallback()
     test_gmail_reader_newest_as_seconds()
     test_gmail_reader_newest_when_no_emails()
+    test_scope_unit()
+    test_gmail_reader_deny_list_drops_recipient()
+    test_gmail_reader_allow_list_keeps_only_matches()
+    test_gmail_reader_scope_drop_still_advances_cursor()
+    test_gmail_reader_scope_matches_cc_and_from()
 
     # Group D
     test_gmail_channel_selected()
