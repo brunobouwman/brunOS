@@ -16,11 +16,14 @@ Covers:
 
 from __future__ import annotations
 
+import hashlib
 import importlib.util
 import json
 import sys
 import tempfile
 from pathlib import Path
+
+import numpy as np
 
 REPO = Path(__file__).resolve().parents[1]
 _spec = importlib.util.spec_from_file_location(
@@ -59,6 +62,17 @@ class _patch:
 
 
 FM = "---\ntype: system\n---\n"
+
+
+def _stub_embed(texts):
+    """Deterministic passage-embed stub: identical text → identical vector (cosine
+    1.0); distinct text → centered hash vectors (cosine ≈ 0, well under 0.95). Lets
+    the dedup gate be tested without loading FastEmbed."""
+    out = []
+    for t in texts:
+        h = hashlib.sha256(t.strip().lower().encode()).digest()
+        out.append(np.frombuffer(h, dtype=np.uint8).astype("float32") - 128.0)
+    return out
 
 
 def _doc(bullets_by_section: dict[str, list[str]]) -> str:
@@ -161,12 +175,13 @@ def test_curation_drains_buffer_and_clears():
             {"type": "lesson", "text": "buffered lesson", "source": "vertik", "ts": "t"},
         ]), encoding="utf-8")
         with _patch(vault_path=lambda: vault, _log=lambda *a, **k: None,
-                    PERSONAL_PENDING_PATH=buf_path):
+                    PERSONAL_PENDING_PATH=buf_path, _embed_texts=_stub_embed):
             rc, fails = mr._run_memory_curation_stage(dry_run=False)
         check(rc == 0 and fails == [], "curation clean")
         body = mem.read_text()
         check("buffered lesson" in body, "buffered item written to MEMORY.md")
         check("existing" in body, "existing item preserved")
+        check("<!-- src: vertik -->" in body, "src-slug provenance annotated on bullet")
         check(json.loads(buf_path.read_text()) == [], "buffer cleared after write")
 
 
@@ -182,11 +197,72 @@ def test_curation_dry_run_keeps_buffer():
             {"type": "lesson", "text": "should stay buffered", "source": "x", "ts": "t"},
         ]), encoding="utf-8")
         with _patch(vault_path=lambda: vault, _log=lambda *a, **k: None,
-                    PERSONAL_PENDING_PATH=buf_path):
+                    PERSONAL_PENDING_PATH=buf_path, _embed_texts=_stub_embed):
             rc, fails = mr._run_memory_curation_stage(dry_run=True)
         check(rc == 0, "dry-run rc 0")
         check("should stay buffered" not in mem.read_text(), "MEMORY.md untouched in dry-run")
         check(len(json.loads(buf_path.read_text())) == 1, "buffer NOT cleared in dry-run")
+
+
+# --- write-time gates: semantic dedup + src-slug provenance -------------------
+
+
+def test_append_skips_near_duplicate():
+    print("[test_append_skips_near_duplicate]")
+    # Existing MEMORY.md already holds "team moved to Floripa"; a buffered item with
+    # the same meaning (cosine 1.0 via the stub) must be skipped, the novel one kept.
+    mem = FM + "## Lessons\n\n- **2026-01-01** — team moved to Floripa\n"
+    items = [
+        {"type": "lesson", "text": "team moved to Floripa", "source": "vertik"},
+        {"type": "lesson", "text": "new distinct lesson", "source": "vertik"},
+    ]
+    with _patch(_log=lambda *a, **k: None, _embed_texts=_stub_embed):
+        out, skipped = mr._append_promotions(mem, items)
+    check(len(skipped) == 1, f"one near-dup skipped (got {len(skipped)})")
+    check(skipped[0]["text"] == "team moved to Floripa", "the duplicate is the one skipped")
+    check(skipped[0]["similarity"] >= 0.95, "skipped entry carries cosine ≥ 0.95")
+    check("new distinct lesson" in out, "novel item appended")
+    check(out.count("team moved to Floripa") == 1, "duplicate NOT re-appended")
+
+
+def test_append_intra_batch_dedup():
+    print("[test_append_intra_batch_dedup]")
+    # Two identical buffered items, nothing pre-existing: first kept, second skipped
+    # (intra-run dedup — the 2nd compares against the just-kept 1st).
+    mem = FM + "## Lessons\n\n"
+    items = [
+        {"type": "lesson", "text": "same exact thing", "source": "a"},
+        {"type": "lesson", "text": "same exact thing", "source": "b"},
+    ]
+    with _patch(_log=lambda *a, **k: None, _embed_texts=_stub_embed):
+        out, skipped = mr._append_promotions(mem, items)
+    check(len(skipped) == 1, f"second identical item skipped (got {len(skipped)})")
+    check(out.count("same exact thing") == 1, "only one copy appended")
+
+
+def test_append_src_annotation():
+    print("[test_append_src_annotation]")
+    mem = FM + "## Lessons\n\n"
+    items = [{"type": "lesson", "text": "annotate me", "source": "colinas"}]
+    with _patch(_log=lambda *a, **k: None, _embed_texts=_stub_embed):
+        out, skipped = mr._append_promotions(mem, items)
+    check("- **" in out and "annotate me  <!-- src: colinas -->" in out,
+          "bullet carries trailing src-slug comment")
+    check(skipped == [], "novel item not skipped")
+
+
+def test_append_dedup_fail_open():
+    print("[test_append_dedup_fail_open]")
+    # Embedding unavailable → gate is a no-op (all items appended), never a barrier.
+    def _boom(_texts):
+        raise RuntimeError("model unavailable")
+
+    mem = FM + "## Lessons\n\n- **2026-01-01** — already here\n"
+    items = [{"type": "lesson", "text": "already here", "source": "x"}]
+    with _patch(_log=lambda *a, **k: None, _embed_texts=_boom):
+        out, skipped = mr._append_promotions(mem, items)
+    check(skipped == [], "fail-open: nothing skipped when embedding errors")
+    check(out.count("already here") == 2, "item appended despite being a dup (fail-open)")
 
 
 # --- continuity-doc eviction (projects/<slug>.md hard backstop) ---------------
@@ -297,6 +373,10 @@ def main():
     test_buffer_personal_appends()
     test_curation_drains_buffer_and_clears()
     test_curation_dry_run_keeps_buffer()
+    test_append_skips_near_duplicate()
+    test_append_intra_batch_dedup()
+    test_append_src_annotation()
+    test_append_dedup_fail_open()
     test_continuity_evicts_oldest_until_under_cap()
     test_continuity_evicts_by_inline_date_protects_undated()
     test_continuity_still_over_when_no_dated()

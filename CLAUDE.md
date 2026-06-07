@@ -374,6 +374,16 @@ into MEMORY.md **once** via `_append_promotions`, then runs
 `_evict_to_archive_if_over_cap` **once**. Result: MEMORY.md is written/compacted at
 most once per day (no per-batch churn) and its byte size is stable.
 
+`_append_promotions` applies two write-time gates (June 2026 competitive survey /
+Mem0): a **semantic dedup gate** — each buffered bullet is passage-embedded and
+skipped if cosine ≥ `DEDUP_COSINE_THRESHOLD` (env `BRUNOS_MEMORY_DEDUP_THRESHOLD`,
+default 0.95) to any existing MEMORY.md bullet OR an earlier kept item this run
+(symmetric passage-vs-passage so identical text → ≈1.0; **fail-open** if embedding
+is unavailable; intra-run so two near-dup buffered items can't both land) — and a
+**provenance annotation**, a trailing `<!-- src: <slug> -->` on each appended bullet
+recording the capture/source it was distilled from. `--dry-run` reports
+`would_append` / `would_skip_dupes`.
+
 Eviction is **deterministic, zero-LLM, and lossless**: while over the 8KB cap, peel
 the **oldest dated bullet** (`- **YYYY-MM-DD** —`) from the **largest section** and
 append it verbatim (+ provenance) to `_archive/MEMORY-archive.md`. Undated context
