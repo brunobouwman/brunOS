@@ -103,6 +103,9 @@ MEMORY_ARCHIVE_SECTION = "## Evicted from MEMORY.md"
 # (undated context bullets like links/aliases stay — eviction stays lossless and
 # order-stable).
 _DATED_BULLET_RE = re.compile(r"^- \*\*(\d{4}-\d{2}-\d{2})\*\*")
+# Any ISO date appearing anywhere in a line — used to date LLM-compacted continuity
+# bullets that carry an inline "(YYYY-MM-DD)" instead of the leading **date** form.
+_DATE_ANYWHERE_RE = re.compile(r"(\d{4}-\d{2}-\d{2})")
 CONTINUITY_HEADER = "## Auto-consolidated continuity"
 PERSONAL_ITEMS_CAP = 8  # max personal promotions accepted per project / run
 INBOX_CAPTURES_PER_BATCH = 8  # captures per Sonnet call; watermark advances per batch
@@ -190,13 +193,19 @@ Output raw JSON only."""
 
 
 PROJECT_COMPACTION_INSTRUCTION = (
-    "Compact this project continuity document to under 7500 bytes. Preserve the "
-    "document's hand-written header content and ALL section headings exactly as-is. "
-    "Only condense the bullets under the '## Auto-consolidated continuity' section — "
-    "merge redundant ones, drop the oldest low-signal entries first, keep dates and "
-    "reversal triggers. Do not touch any other section's content. Output raw markdown "
-    "only — no preamble, no fenced blocks, no explanation. Do not include YAML "
-    "frontmatter; start directly with the first heading."
+    "Compact this project continuity document to under 7000 bytes — this is a HARD "
+    "limit, not a target; if you cannot get under it, drop more, do not stop early. "
+    "Preserve the document's hand-written header content and ALL section headings "
+    "exactly as-is. Only condense the bullets under the '## Auto-consolidated "
+    "continuity' section. Retire in this order until under the limit: (1) DROP items "
+    "that are DONE/superseded — merged PRs whose state is already baked into the "
+    "current model, resolved bugs, completed migrations; (2) MERGE redundant or "
+    "overlapping bullets; (3) tighten prose. KEEP all open/action-required items, "
+    "durable schema/infra quirks, and any reversal triggers regardless of age — "
+    "recency is NOT the signal, done-ness is. Keep an inline (YYYY-MM-DD) date on "
+    "bullets that have one. Do not touch any other section's content. Output raw "
+    "markdown only — no preamble, no fenced blocks, no explanation. Do not include "
+    "YAML frontmatter; start directly with the first heading."
 )
 
 
@@ -719,13 +728,141 @@ def _insert_continuity(text: str, bullets: list[str]) -> str:
     return fm + body
 
 
+def _new_continuity_archive(slug: str) -> str:
+    """Frontmatter + heading for a fresh projects/_archive/<slug>-continuity.md."""
+    ts = _ts_brt()
+    return (
+        "---\n"
+        "type: reference\n"
+        f"created: {ts}\n"
+        f"updated: {ts}\n"
+        "tags:\n"
+        "  - archive\n"
+        "  - continuity\n"
+        f"  - {slug}\n"
+        "status: active\n"
+        "---\n\n"
+        f"# {slug} continuity archive\n\n"
+        "Continuity bullets evicted from "
+        f"projects/{slug}.md when it exceeded the {PROJECT_DOC_CAP_BYTES}B cap "
+        "(oldest-first, lossless — a move, not a delete; still searchable).\n"
+    )
+
+
+def _continuity_bullet_date(line: str) -> str | None:
+    """The eviction date for a continuity bullet, or None if it has none (→ protected).
+
+    Real continuity docs come in two shapes: freshly-inserted bullets carry a
+    leading `- **YYYY-MM-DD** —`; LLM-compacted docs reorganize into thematic `###`
+    subsections whose bullets instead carry an INLINE date (e.g. "PR #514 MERGED
+    (2026-06-04)"). We accept either, preferring the leading date. A bullet with NO
+    date of its own is treated as durable and never evicted (mirrors MEMORY.md,
+    where undated context bullets like links/aliases are protected) — we do NOT
+    inherit a subsection's date, because the OLDEST `### ...(date)` here is the
+    active "Open / action-required" group, which must not be shed by age.
+    """
+    if not line.lstrip().startswith("- "):
+        return None
+    m = _DATED_BULLET_RE.match(line)
+    if m:
+        return m.group(1)
+    m = _DATE_ANYWHERE_RE.search(line)
+    return m.group(1) if m else None
+
+
+def _evict_one_oldest_continuity_bullet(body: str) -> tuple[str, str] | None:
+    """Peel the OLDEST self-dated bullet from the ## Auto-consolidated continuity section.
+
+    Returns (new_body, bullet_line), or None when that section is absent or holds no
+    self-dated bullet (only undated/durable bullets remain → caller reports
+    still_over_cap to monitoring). Scoped strictly to the continuity section: the
+    hand-written header above it and any other section are never touched. Ties on
+    date break by earliest position. See _continuity_bullet_date for the date rule.
+    """
+    idx = body.find(CONTINUITY_HEADER)
+    if idx < 0:
+        return None
+    after_header = idx + len(CONTINUITY_HEADER)
+    next_section = re.search(r"^## ", body[after_header:], re.MULTILINE)
+    sec_end = after_header + next_section.start() if next_section else len(body)
+    section = body[after_header:sec_end]
+    lines = section.split("\n")
+    dated = [
+        (d, i)
+        for i, ln in enumerate(lines)
+        if (d := _continuity_bullet_date(ln)) is not None
+    ]
+    if not dated:
+        return None
+    dated.sort(key=lambda t: (t[0], t[1]))
+    victim = dated[0][1]
+    bullet = lines[victim]
+    new_section = "\n".join(lines[:victim] + lines[victim + 1:])
+    new_body = body[:after_header] + new_section + body[sec_end:]
+    return new_body, bullet
+
+
+def _append_to_continuity_archive(slug: str, evicted: list[str]) -> None:
+    """Append evicted continuity bullets verbatim to the per-slug continuity archive.
+
+    Lossless: the original bullet (date + text) is preserved; a provenance suffix
+    records the eviction date. Lock + atomic. Mirrors _append_to_memory_archive.
+    """
+    path = vault_path() / "Memory" / "projects" / "_archive" / f"{slug}-continuity.md"
+    today = now_brt().strftime("%Y-%m-%d")
+    block = [f"{b.rstrip()}  _(evicted {today})_" for b in evicted]
+    with file_lock(path):
+        existing = _read_text(path) if path.exists() else _new_continuity_archive(slug)
+        if not existing.endswith("\n"):
+            existing += "\n"
+        atomic_write(path, existing + "\n".join(block) + "\n")
+
+
+def _evict_continuity_to_archive_if_over_cap(
+    slug: str,
+    text: str,
+    cap_bytes: int = PROJECT_DOC_CAP_BYTES,
+    *,
+    dry_run: bool = False,
+) -> tuple[str, list[str], bool]:
+    """Deterministic, zero-LLM, lossless cap backstop for a project continuity doc.
+
+    The continuity-doc analogue of _evict_to_archive_if_over_cap (MEMORY.md), but
+    scoped to the ## Auto-consolidated continuity section: while over cap, peel the
+    oldest dated continuity bullet and move it to
+    projects/_archive/<slug>-continuity.md. Runs AFTER the LLM merge-pass
+    (_compact_if_over_cap), so it only fires when compaction couldn't get under cap
+    — the LLM has proven unreliable at honoring the target, so this guarantees the
+    doc lands under cap (or reports still_over_cap when no dated bullet remains).
+    Returns (new_text, evicted_bullets, still_over_cap).
+    """
+    if len(text.encode("utf-8")) <= cap_bytes:
+        return text, [], False
+    fm, body = _split_memory(text)
+    evicted: list[str] = []
+    while len((fm + body).encode("utf-8")) > cap_bytes:
+        res = _evict_one_oldest_continuity_bullet(body)
+        if res is None:
+            break  # no dated continuity bullet left — can't evict losslessly
+        body, bullet = res
+        evicted.append(bullet)
+    new_text = fm + body
+    still_over = len(new_text.encode("utf-8")) > cap_bytes
+    if evicted and not dry_run:
+        _append_to_continuity_archive(slug, evicted)
+    return new_text, evicted, still_over
+
+
 def _append_continuity(slug: str, bullets: list[str]) -> bool:
     """Insert continuity bullets into projects/<slug>.md, creating it if absent.
 
-    Caps the file to PROJECT_DOC_CAP_BYTES via the generalized compaction (which
-    preserves the hand-written header). Lock-guarded atomic write. Returns True
-    if the doc is STILL over cap after the compaction attempt (a soft failure
-    the caller surfaces to monitoring).
+    Caps the file to PROJECT_DOC_CAP_BYTES in two tiers: first the LLM merge-pass
+    (_compact_if_over_cap, which preserves the hand-written header), then — if that
+    still can't get under cap — the deterministic continuity evictor as a hard
+    backstop (sheds oldest dated bullets to the per-slug archive). Lock-guarded
+    atomic write. Returns True if the doc is STILL over cap even after eviction (a
+    soft failure the caller surfaces to monitoring — only possible when no dated
+    bullet remains to peel).
     """
     if not bullets:
         return False
@@ -736,6 +873,15 @@ def _append_continuity(slug: str, bullets: list[str]) -> bool:
         text, over_cap = _compact_if_over_cap(
             text, PROJECT_DOC_CAP_BYTES, instruction=PROJECT_COMPACTION_INSTRUCTION
         )
+        if over_cap:
+            text, evicted, over_cap = _evict_continuity_to_archive_if_over_cap(
+                slug, text, PROJECT_DOC_CAP_BYTES
+            )
+            if evicted:
+                _log(
+                    f"  inbox[{slug}]: compaction short of cap — evicted "
+                    f"{len(evicted)} oldest continuity bullet(s) → _archive/{slug}-continuity.md"
+                )
         atomic_write(path, text)
     _log(f"  inbox[{slug}]: continuity doc updated ({len(text.encode('utf-8'))}B)")
     return over_cap

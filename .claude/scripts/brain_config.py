@@ -37,11 +37,24 @@ DEFAULTS: dict = {
     "role": "individual",  # "individual" | "company"
     "reflection": {
         # Frequent federation-fast pass: distil captures, buffer personal items,
-        # update continuity, strip+clear in place.
+        # update continuity, strip+clear in place. `hours` is the inclusive
+        # start-end window for cadence == "hourly" (one run on each :00 in range).
         "inbox_pass": {"enabled": True, "cadence": "hourly", "hours": "08-20"},
         # Daily curation: drain the personal buffer + daily-log promotions into
-        # MEMORY.md once, then evict-to-archive once.
-        "memory_curation": {"enabled": True, "cadence": "daily@08:00"},
+        # MEMORY.md once, then evict-to-archive once. This is the ONLY writer of
+        # MEMORY.md.
+        #
+        # CADENCE COLLISION RULE — read before changing the time below.
+        # inbox_pass and memory_curation share a single reflection run-lock
+        # (memory_reflect.py); whichever fires first at a given instant wins and
+        # the other SKIPS that tick. memory_curation runs once a day, so if its
+        # time lands on an inbox_pass :00 slot it loses the race and curation
+        # silently doesn't run that day (the buffer never drains into MEMORY.md).
+        # Therefore keep this time OFF every hour inside inbox_pass.hours — i.e.
+        # either outside [hours] entirely (07:00, before the 08-20 window) or on a
+        # non-:00 minute. 07:00 is the default: clear of the 08-20 inbox window,
+        # and it drains everything buffered through yesterday's last inbox run.
+        "memory_curation": {"enabled": True, "cadence": "daily@07:00"},
         # strip+clear+forward to the company inbox. False for a solo brain that
         # still wants inbox distillation but no federation.
         "federation": True,

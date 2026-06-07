@@ -189,6 +189,106 @@ def test_curation_dry_run_keeps_buffer():
         check(len(json.loads(buf_path.read_text())) == 1, "buffer NOT cleared in dry-run")
 
 
+# --- continuity-doc eviction (projects/<slug>.md hard backstop) ---------------
+
+CONT_FM = "---\ntype: project\n---\n"
+
+
+def _cont_doc(header_bullets: list[str], continuity_bullets: list[str]) -> str:
+    """A project doc: frontmatter + hand-written section + continuity section LAST."""
+    parts = [CONT_FM, "# vertik\n", "## Hand-written notes\n"]
+    parts.extend(header_bullets)
+    parts.append("")
+    parts.append(mr.CONTINUITY_HEADER)
+    parts.extend(continuity_bullets)
+    parts.append("")
+    return "\n".join(parts)
+
+
+def test_continuity_evicts_oldest_until_under_cap():
+    print("[test_continuity_evicts_oldest_until_under_cap]")
+    cont = [f"- **2026-05-{d:02d}** — continuity item {d} " + ("z" * 200) for d in range(2, 14)]
+    cont.insert(0, "- **2026-01-01** — OLDEST continuity item " + ("z" * 200))
+    text = _cont_doc(["- **2026-06-01** — handwritten keep me " + ("h" * 100)], cont)
+    with tempfile.TemporaryDirectory() as td:
+        vault = Path(td) / "vault"
+        with _patch(vault_path=lambda: vault, _log=lambda *a, **k: None):
+            out, evicted, over = mr._evict_continuity_to_archive_if_over_cap(
+                "vertik", text, 2048, dry_run=False
+            )
+        check(len(out.encode()) <= 2048, f"under cap after eviction ({len(out.encode())}B)")
+        check(over is False, "still_over_cap False")
+        check("OLDEST continuity item" not in out, "oldest continuity bullet evicted first")
+        # Hand-written header bullet (a dated bullet in another section) is untouched.
+        check("handwritten keep me" in out, "hand-written section preserved (scoped to continuity)")
+        arch = (vault / "Memory" / "projects" / "_archive" / "vertik-continuity.md").read_text()
+        check("OLDEST continuity item" in arch, "evicted bullet archived verbatim (lossless)")
+
+
+def test_continuity_evicts_by_inline_date_protects_undated():
+    print("[test_continuity_evicts_by_inline_date_protects_undated]")
+    # LLM-compacted shape: thematic ### subsections, bullets carry INLINE dates (or
+    # none). Oldest inline-dated bullet is the victim; a truly undated durable bullet
+    # is protected even though it sits in the same section.
+    cont = [
+        "### Recently merged (state baked in)",
+        "- **#515 MERGED** (2026-06-04): clarify_drop fix " + ("m" * 220),
+        "- **#520 reviewed** (2026-06-06): buffer-then-replay " + ("m" * 220),
+        "### Durable schema",
+        "- `orcamento_audits.status` enum is keyed on orcamento_id " + ("d" * 220),
+    ]
+    text = _cont_doc([], cont)
+    with tempfile.TemporaryDirectory() as td:
+        vault = Path(td) / "vault"
+        with _patch(vault_path=lambda: vault, _log=lambda *a, **k: None):
+            out, evicted, over = mr._evict_continuity_to_archive_if_over_cap(
+                "vertik", text, 700, dry_run=False
+            )
+        check("2026-06-04" not in out, "oldest inline-dated bullet (06-04) evicted first")
+        check("orcamento_audits.status" in out, "undated durable bullet protected")
+        arch = (vault / "Memory" / "projects" / "_archive" / "vertik-continuity.md").read_text()
+        check("#515 MERGED" in arch, "evicted inline-dated bullet archived verbatim")
+
+
+def test_continuity_still_over_when_no_dated():
+    print("[test_continuity_still_over_when_no_dated]")
+    text = _cont_doc([], ["- undated " + ("y" * 4000), "- also undated " + ("y" * 4000)])
+    with tempfile.TemporaryDirectory() as td:
+        vault = Path(td) / "vault"
+        with _patch(vault_path=lambda: vault, _log=lambda *a, **k: None):
+            out, evicted, over = mr._evict_continuity_to_archive_if_over_cap("vertik", text, 2048)
+        check(evicted == [], "nothing evicted (no dated continuity bullets)")
+        check(over is True, "still_over_cap True (signals monitoring)")
+        check(out == text, "doc unchanged (nothing dropped)")
+
+
+def test_append_continuity_backstop_evicts():
+    print("[test_append_continuity_backstop_evicts]")
+
+    # Simulate the LLM merge-pass failing to get under cap → backstop must evict.
+    def _fake_compact(t, cap, instruction=None):
+        return t, len(t.encode()) > cap
+
+    with tempfile.TemporaryDirectory() as td:
+        vault = Path(td) / "vault"
+        proj = vault / "Memory" / "projects" / "vertik.md"
+        proj.parent.mkdir(parents=True, exist_ok=True)
+        existing = _cont_doc(
+            [], [f"- **2026-05-{d:02d}** — old item {d} " + ("z" * 300) for d in range(1, 40)]
+        )
+        proj.write_text(existing, encoding="utf-8")
+        with _patch(vault_path=lambda: vault, _log=lambda *a, **k: None,
+                    _compact_if_over_cap=_fake_compact):
+            over = mr._append_continuity("vertik", ["fresh continuity bullet"])
+        body = proj.read_text()
+        check(len(body.encode()) <= mr.PROJECT_DOC_CAP_BYTES,
+              f"doc under cap after backstop ({len(body.encode())}B)")
+        check(over is False, "returns not-over-cap after eviction")
+        check("fresh continuity bullet" in body, "new bullet inserted + kept (newest)")
+        check((vault / "Memory" / "projects" / "_archive" / "vertik-continuity.md").exists(),
+              "archive created by backstop")
+
+
 def main():
     test_under_cap_noop()
     test_evicts_oldest_from_largest_section()
@@ -197,6 +297,10 @@ def main():
     test_buffer_personal_appends()
     test_curation_drains_buffer_and_clears()
     test_curation_dry_run_keeps_buffer()
+    test_continuity_evicts_oldest_until_under_cap()
+    test_continuity_evicts_by_inline_date_protects_undated()
+    test_continuity_still_over_when_no_dated()
+    test_append_continuity_backstop_evicts()
     print(f"\n{_PASS} passed, {_FAIL} failed")
     return 1 if _FAIL else 0
 
