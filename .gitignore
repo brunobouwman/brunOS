@@ -43,6 +43,13 @@ dist/
 .claude/skills/brunos-vault/
 .claude/skills/memory-search/
 
+# CLAUDE.md is BRAIN-LOCAL (the instance layer), not engine. It declares THIS brain's
+# identity + deployment ("I am <BrainName>") — a clone must not inherit another brain's
+# identity. The engine ships CLAUDE.template.md; each brain's CLAUDE.md is generated from
+# its onboarding spec (create-second-brain-prd) + placed by bootstrap-brain. See
+# .agent/plans/engine-instance-extraction.md (P2). BrunOS keeps its CLAUDE.md locally per host.
+/CLAUDE.md
+
 # OS / editors
 .DS_Store
 Thumbs.db
