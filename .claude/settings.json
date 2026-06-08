@@ -38,6 +38,15 @@
             "command": "cd \"$CLAUDE_PROJECT_DIR\" && uv run python .claude/hooks/protect-soul.py"
           }
         ]
+      },
+      {
+        "matcher": "Bash|Edit|Write|MultiEdit|NotebookEdit",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "cd \"$CLAUDE_PROJECT_DIR\" && uv run python .claude/hooks/path-boundary.py"
+          }
+        ]
       }
     ],
     "PreCompact": [
