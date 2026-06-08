@@ -11,7 +11,6 @@ description: >-
   secure, uniform build; diagnose-brain validates it. That split is the whole point: it's why
   two people filling the same requirements no longer end up with divergent, possibly-insecure
   setups.
-argument-hint: <path-to-requirements> [output-dir]
 ---
 
 # Second Brain Onboarding Spec Generator
