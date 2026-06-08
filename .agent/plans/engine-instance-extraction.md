@@ -110,13 +110,31 @@ the daemons' graceful restart; rollback = re-point the remote. Validate with `di
 
 ---
 
-## 5. Open questions for Bruno
+## 5. Decisions (resolved 2026-06-08)
 
-1. **Engine repo name + owner** (`protostack/brain-engine`?). Private, Protostack-owned.
-2. **History:** fresh init vs. filtered history of the current repo.
-3. **Client read-access mechanism** to the engine (deploy key / token / mirror).
-4. **Does BrunOS-Mac keep dual role** (engine-dev + instance) or do we separate the engine dev
-   clone from the BrunOS instance clone on the same machine? (Lean: same clone, dev + run.)
+1. **Engine repo:** `protostack/brain-engine` — private, Protostack-owned. ✅
+2. **History:** **fresh `git init`** — the old `brunobouwman/brunOS` history carries personal
+   content (vault refs, possibly early secrets); a client-readable repo must start clean. ✅
+3. **Release model (versioned stable channel):**
+   - **`main`** = development. **`stable`** = promoted, **semver-tagged** releases (`v1.x.y`).
+   - **Release gate** ("reaches stability"): full test suite green + `diagnose-brain` green +
+     **run clean on BrunOS for a cycle**. **BrunOS is the canary** — Bruno's daily use IS the
+     stability test; when a version proves out on BrunOS, promote `main → stable` (tag it).
+   - **Channels:** **BrunOS pulls `main`** (dogfoods bleeding edge); **LisaOS / LinOS / every
+     client pulls `stable`** (tested releases only). A bad commit can't reach a client — it must
+     survive Bruno's own usage first.
+   - **Access:** per-client **read-scoped deploy key / token** to the engine repo; their
+     code-sync pulls the `stable` branch (or pins a tag). Same `git pull` mechanism, pointed at
+     `stable`.
+4. **BrunOS-Mac:** **one clone** (engine-dev + BrunOS instance together, instance layer
+   gitignored alongside) — keep the current workflow; two clones buy isolation we don't need. ✅
+
+### Effect on the migration phases
+
+- **P3** (create engine repo) also sets up the **`main`/`stable` branch model + the release gate**
+  (CI: test suite + a `diagnose-brain` smoke clone). Tag the first cut `v1.0.0` on `stable`.
+- **P4–P6** (per-brain migration): each brain's code-sync points at the right **channel** —
+  BrunOS→`main`, LisaOS/LinOS→`stable`. Clients (later) get a read-scoped key + `stable`.
 
 ---
 
