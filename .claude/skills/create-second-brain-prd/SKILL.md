@@ -1,144 +1,119 @@
 ---
 name: create-second-brain-prd
-description: Generate a personalized Second Brain PRD from a completed requirements template. Use when the user has filled out my-second-brain-requirements.md and wants to generate their build plan. Triggers on "create my second brain PRD", "generate my PRD", "build my second brain plan", "/create-second-brain-prd", or after completing the requirements template.
-argument-hint: <path-to-requirements> [output-path]
+description: >-
+  Elicit a brain's customization (from the requirements template) and emit the STRUCTURED
+  ONBOARDING SPEC — brain-config.json + the per-brain variables + the seed content
+  (SOUL/USER/STANDARDS/folders) — that the bootstrap-brain skill builds from
+  deterministically. Use when onboarding a new brain — yours, a teammate's, or a client's:
+  "create my second brain PRD", "generate my brain spec", "onboard a brain", "scope a client
+  brain", or after filling the requirements template. Handles individual AND company/client
+  brains. It produces the WHAT (config + seeds), NOT the HOW — bootstrap-brain owns the
+  secure, uniform build; diagnose-brain validates it. That split is the whole point: it's why
+  two people filling the same requirements no longer end up with divergent, possibly-insecure
+  setups.
 ---
 
-# Second Brain PRD Generator
+# Second Brain Onboarding Spec Generator
 
-Generate a personalized Product Requirements Document for building an AI Second Brain, based on the user's completed requirements template.
+Turn a person's / company's filled-out requirements into the **structured onboarding spec**
+that `bootstrap-brain` builds from. This is the **elicit** front-end of onboarding:
 
-**A blank template is bundled with this skill at `${CLAUDE_SKILL_DIR}/my-second-brain-requirements.md`.** Copy it to your workspace and fill it out before running this skill.
+```
+create-second-brain-prd (ELICIT → config + seeds) → bootstrap-brain (DETERMINISTIC, SECURE BUILD) → diagnose-brain (VALIDATE)
+```
 
-## Parameters
+## Why this skill changed (read this)
 
-- **`$0`** (required) — Path to the filled-out requirements file (e.g., `./my-second-brain-requirements.md`)
-- **`$1`** (optional) — Output path for the PRD. Defaults to `.agent/plans/second-brain-prd.md`
+The old version emitted a **broad, phased build PRD that a coding agent then interpreted** —
+which is exactly why two people (e.g. Bruno + Lisa) followed the same process and ended up
+with **different, inconsistent setups**, and why a broadly-guided agent might skip a hook or
+mis-wire a gate. The build is now **deterministic** (`bootstrap-brain` installs the same
+battle-tested, secure stack every time). This skill only produces the **customization** — the
+config + seed content that *varies* per brain. **A spec can only set config/content; it cannot
+produce an insecure or incomplete brain** — the security layers + privacy gates are installed
+uniformly by bootstrap and verified by diagnose-brain. That's the fix for both the divergence
+and the security risk.
+
+So: keep the requirements elicitation (it captures each client's specifics); drop
+requirements-as-build-guide.
+
+## Inputs
+
+- **`$0`** — path to the filled requirements file (the bundled, extended
+  `${CLAUDE_SKILL_DIR}/my-second-brain-requirements.md`; copy + fill it first).
+- **`$1`** (optional) — output dir for the spec bundle. Default `.agent/plans/brain-spec/<slug>/`.
+
+## Outputs — the onboarding spec bundle (what bootstrap consumes)
+
+1. **`brain-config.json`** — the machine-readable knobs: `role`, `timezone`, `default_language`,
+   `action_surface` (from proactivity), `reflection.federation` + federation role, integrations
+   **enabled** (from platforms + priority), cadences, `personas` (company), `channels`,
+   `comms_capture`, `notify`. (Shape: `brain_config.DEFAULTS` + `Memory/Brain/brain-config.template.json`.)
+2. **Per-brain variables** — the parameterization block (company: the "Per-Company Variables"
+   YAML from `company_brain_seed_contract.md`; individual: the equivalent — name, vault slug,
+   timezone, language, proactivity, federation role/scope).
+3. **Seed content** (filled from the answers, in the right voice):
+   - **Individual:** `SOUL.md`, `USER.md`, `MEMORY.md` (sparse), `HEARTBEAT.md`, `HABITS.md`.
+   - **Company:** `SOUL.md`, `COMPANY.md`/`USER.md`, `LINMEMORY.md`/`COMPANY_MEMORY.md`,
+     `STANDARDS.md`, `DECISIONS.md`, `ROUTINES.md`, `ACCESS_POLICY.md`, `_excluded-people.md`,
+     `_brain-filing-rules.md` (use the templates in `company_brain_seed_contract.md`).
+4. **Folder taxonomy** — derived from the memory categories → the brain's `Memory/` subfolders,
+   which `bootstrap-brain` R3 uses to generate the brain-local `vault-structure` + `memory-search`
+   skills.
+
+**It does NOT emit** a build narrative, phase plan, or anything an agent free-interprets. The
+build is `bootstrap-brain`.
 
 ## Workflow
 
-1. **Read the requirements** — Read the filled-out requirements file at `$0`. If no argument was provided, ask the user for the path. If they haven't filled one out yet, tell them a blank template is available at `${CLAUDE_SKILL_DIR}/my-second-brain-requirements.md` — they should copy it to their workspace and fill it out first.
+0. **Read requirements + determine shape.** Read `$0`. Resolve: **role** (individual | company),
+   **federation** (singleton | producer→a company brain | consumer = is the company brain),
+   **self vs client**. If the file is unfilled, point them at the bundled template.
+1. **Map answers → `brain-config.json`** (see the mapping table). Use `brain_config.DEFAULTS` as
+   the base; set only what the answers specify.
+2. **Generate the seed content** from the role's templates, filled from the answers. Company
+   uses the **neutral institutional voice** + governance-first SOUL from
+   `company_brain_seed_contract.md`; individual uses the personal-brain shape. Never invent
+   excluded names; keep STANDARDS/DECISIONS separate from SOUL.
+3. **Derive the folder taxonomy** from the memory categories (+ company departments).
+4. **Light per-integration check** — for each enabled integration, note its auth method + env
+   var names (so the config/`.env` placeholders are right). This is *only* to set integration
+   config correctly — **not** to write a build guide. Research a platform only if its auth shape
+   is unfamiliar.
+5. **Emit the spec bundle** to the output dir. Record **names, never secret values**.
+6. **Hand off:** tell the operator to run **`bootstrap-brain` (greenfield)** against this spec —
+   it installs the uniform secure stack parameterized by the spec — then **`diagnose-brain`**
+   validates it's complete + secure.
 
-2. **Load the architecture reference** — Read `${CLAUDE_SKILL_DIR}/references/architecture-reference.md` for the blueprint.
+## Mapping rules (requirements → config / seeds)
 
-3. **Research ALL tools and APIs** — Do not assume familiarity with any platform or library. Even common APIs like Gmail or Slack have nuances, rate limits, and SDK-specific patterns that matter for implementation. For every tool in the user's stack, do web research to ensure the PRD contains accurate, specific guidance.
+| Requirement answer | → maps to |
+|---|---|
+| Name / role / daily work / timezone | `USER.md` (or `COMPANY.md`) + `brain-config` timezone/language |
+| Vault folder name | vault slug / path; folder taxonomy root |
+| Platforms + Integration Priority | integrations **enabled** in `brain-config` + the build order; `.env` placeholders |
+| Top Tasks | which optional features + custom skills/personas to enable (NOT a build plan) |
+| **Proactivity level** | `action_surface` + SOUL action boundaries + draft-lifecycle on/off (Observer→notify-only … Partner→autonomous-low-risk) |
+| **Security boundaries** | SOUL "**NEVER** without approval" list + the path-boundary guard's policy (these are **mandatory/uniform** — security is battle-tested, not optional; the answers tune wording, not whether the gates exist) |
+| Memory categories (+ departments) | the `Memory/` folder taxonomy → vault-structure skill |
+| Infrastructure (OS / local / VPS) | deployment target, `gen_schedules` platform, single-instance/failover |
+| **Role + federation** | the seed set (individual vs company) + which federation units (producer / consumer / none for a singleton) |
+| **Company: departments / tiers / standards / personas** | `ACCESS_POLICY.md` tiers, `STANDARDS.md`/`DECISIONS.md` seeds, `personas` enabled, channel registry |
 
-   **Always research these core dependencies:**
-   - **Claude Agent SDK** — How to create conversations, system_prompt presets, setting_sources, allowed_tools, streaming responses, credential handling
-   - **FastEmbed** — ONNX model loading, batch embedding API, model cache configuration, supported models
-   - **Hook system** — Claude Code hook types (PreToolUse, PostToolUse, etc.), callback signatures, settings.json configuration
+## The security/completeness invariant
 
-   **For every platform the user selected (Gmail, Slack, Linear, HubSpot, etc.):**
-   - Authentication method (OAuth2 flow, API tokens, bot tokens, etc.)
-   - Key SDK/library to use (e.g., google-api-python-client, slack_sdk, etc.)
-   - The specific API endpoints needed for the user's top tasks
-   - Platform-specific setup requirements (e.g., Slack Socket Mode needs an App Token + Bot Token, Gmail needs OAuth consent screen published to Production for custom domains)
-   - Rate limits, pagination patterns, and common gotchas
+Because the build is `bootstrap-brain` (which installs block-secrets / dangerous-bash /
+protect-soul / path-boundary, the privacy/federation gates, sanitization, and monitoring, then
+re-runs `diagnose-brain` to verify), **a spec produced here cannot result in an insecure or
+incomplete brain.** The spec varies only the customization; the infrastructure is uniform. This
+is the structural guarantee that replaces "hope the agent followed the PRD correctly."
 
-   **The goal:** Every phase in the PRD should contain enough technical specificity that a coding agent can implement it without guessing. Don't bloat the PRD with raw research - distill it into actionable implementation notes per phase.
+## References
 
-4. **Generate the PRD** — Create a phased build plan at the output path ($1, or `.agent/plans/second-brain-prd.md` if not specified) with these sections:
-
-### PRD Structure
-
-The output PRD should have:
-
-**Header:**
-- Project name (personalized: "[User's Name]'s Second Brain")
-- Date generated
-- Summary: 1-2 sentences based on their top tasks
-
-**Phase 1: Foundation (Memory Layer)**
-- Set up the memory vault folder using the name they specified in "Memory vault folder name" (e.g., `MyVault/Memory/`). Do NOT hardcode "Dynamous" — always use their chosen name.
-- If they're using Obsidian, mention it as the viewer; if not, note that the vault is just a folder of markdown files that works with any editor.
-- Create SOUL.md, USER.md, MEMORY.md, BOOTSTRAP.md, daily/ structure
-- BOOTSTRAP.md is a first-run onboarding script: on the user's very first Claude Code session, it drives an interactive conversation to personalize USER.md, SOUL.md, and HEARTBEAT.md (asks about name, timezone, role, communication style, integrations, proactivity preferences — one question at a time). It deletes itself after onboarding completes. If a session ends mid-onboarding, the file persists and picks up next time. The SessionStart hook should detect BOOTSTRAP.md and inject it into context.
-- Create **CLAUDE.md** at the repo root — this is Claude Code's project instruction file, loaded into every conversation. Initialize it with: project description, key paths (vault, scripts, hooks, skills, data directories), project conventions (timezone, advisor mode, no secrets in vault, checkbox syntax, YAML frontmatter), and a "Completed Phases" section to be updated after each phase. Also add a "Build Commands" section — start with placeholder entries and populate with real commands as each phase introduces them. This file is the agent's reference for how to interact with the project.
-- Customize each file based on their "About You" and "Memory Categories" answers
-- Key files to create, estimated complexity: Low
-
-**Phase 2: Hooks (Context Persistence)**
-- SessionStart hook (inject memory into every conversation — should also detect and inject BOOTSTRAP.md for first-run onboarding)
-- PreCompact hook (extract conversation context → spawn background `memory_flush.py`)
-- SessionEnd hook (same pattern — extract context → spawn background flush)
-- `memory_flush.py`: Background Agent SDK script spawned by PreCompact/SessionEnd. Uses Claude with `allowed_tools=[]` (pure reasoning, no tools) to intelligently decide what decisions, lessons, and facts from the conversation are worth saving. Writes bullet-point summary to daily log. Has deduplication and file locking. This is critical — without it, daily logs contain mechanical transcript excerpts instead of intelligent summaries that the daily reflection can actually promote to MEMORY.md.
-- **Hook recursion prevention**: Every Agent SDK session (heartbeat, reflection, chat, memory flush) must set `os.environ["CLAUDE_INVOKED_BY"] = "<name>"`. SessionEnd and PreCompact hooks check this env var and skip if set — this prevents Agent SDK exits from triggering additional flushes, which would cause duplicate log entries or infinite recursion.
-- **Shared utilities** (`shared.py`): Cross-platform file locking (`file_lock()` using `msvcrt` on Windows / `fcntl` on Unix) for concurrent write safety, retry with exponential backoff (`with_retry()`) for external API calls, and atomic state writes. Multiple processes (heartbeat, reflection, chat, flush) write to daily logs and state files concurrently — without file locking, they corrupt each other.
-- Key files, estimated complexity: Medium
-
-**Phase 3: Memory Search (Hybrid RAG)**
-- Set up chunking + embedding pipeline
-- SQLite + sqlite-vec + FTS5 (local) or Postgres + pgvector (VPS)
-- Hybrid search: 0.7 vector + 0.3 keyword
-- Key files, estimated complexity: Medium
-
-**Phase 4: Integrations (Their Top 3 First)**
-- Use their "Integration Priority" rankings
-- For each: auth setup, API module, registry entry, query.py subcommand
-- Reference the integration_template.py pattern
-- Key files per integration, estimated complexity: Medium per integration
-
-**Phase 5: Skills (Starter Pack)**
-- Vault structure skill (teach agent their file organization)
-- At least one custom skill based on their "Top Tasks"
-- Skill anatomy: SKILL.md + scripts/ + references/
-- Key files, estimated complexity: Low-Medium
-
-**Phase 6: Proactive Systems (Heartbeat + Reflection)**
-- Heartbeat flow must be staged as: (1) Python gathers data from integrations → (2) state diffing → (3) **pre-flight guardrail agent** (see Phase 8 — a separate no-tools Claude call that evaluates the sanitized external data and returns `{verdict: "pass"|"fail"|"suspicious"}` before the main heartbeat agent ever sees it; fail aborts the run, suspicious proceeds with warning) → (4) main Claude Agent SDK reasoning call with tools → (5) notify. The pre-flight guardrail step is not optional — it is the only semantic injection check in the security stack and must be wired directly into the heartbeat pipeline, not bolted on as a separate phase.
-- **State diffing** (stage 2 of the heartbeat flow): implement `build_snapshot(gmail_data, asana_data, slack_data, calendar_data, ...)` and `diff_snapshot(current, previous)` functions that produce a hashable snapshot of each integration's current state and compute the delta vs. the previous run. Persist state at `.claude/data/state/heartbeat-state.json` (atomic writes via `shared.py`). Only the delta — new emails, newly overdue tasks, newly unread Slack messages — is passed into the main Claude reasoning call. This is the notification-fatigue solution: without state diffing, every 30-minute run re-surfaces the same unread emails and the user gets paged endlessly. Without this mechanism the heartbeat is unusable in production. Must be a named deliverable with these exact function names so students can trace the pattern in the generated PRD.
-- Set schedule based on their proactivity level
-- Daily reflection: promote important daily log items to MEMORY.md. Must include **SOUL.md write-protection** — a PreToolUse hook that blocks the reflection agent from editing SOUL.md. If the reflection wants to suggest changes to the agent's identity or rules, it writes those suggestions to the daily log instead. This prevents "soul drift" where the agent gradually rewrites its own personality without user approval.
-- Map their proactivity level choice to specific heartbeat behaviors
-- **Draft management** (required for Advisor/Assistant/Partner proactivity levels): The heartbeat must implement a full draft lifecycle system. Specifically: (1) scan integration data for emails, DMs, and community posts needing a reply, (2) generate draft replies in the user's voice using RAG on `drafts/sent/` for voice-matching (`memory_search.py --path-prefix drafts/sent`), (3) write drafts as markdown files in `drafts/active/` with YAML frontmatter (type, source_id, recipient, subject, context, created, status) + Original Message + Draft Reply sections, (4) expire drafts >24h old with no action by moving to `drafts/expired/`, (5) detect when the user has actually replied on the platform and move the file to `drafts/sent/` capturing their real reply text. The heartbeat Agent SDK session needs Write/Edit tools to create draft files — read-only tools are insufficient. Drafting criteria should be defined in USER.md (what to draft, what to skip).
-- **Habits tracking**: HABITS.md with customizable pillars, auto-detection rules for objective achievements, daily reset by heartbeat, late-day nudges for unchecked pillars
-- Key files, estimated complexity: High
-
-**Phase 7: Chat Interface (Optional)**
-- Only include if they checked Chat/Messaging in platforms
-- Slack/Discord bot with persistent conversations
-- Platform adapter pattern for extensibility
-- Key files, estimated complexity: High
-
-**Phase 8: Security Hardening**
-- **Credential protection hook** (`block-secrets.py`): PreToolUse hook that intercepts ALL file-access tools (Read, Bash, Grep, Edit, Write, Glob) and blocks access to .env files, API tokens, OAuth credentials, SSH keys, and other secrets. Also blocks Bash commands that would expose environment variables, and blocks writing scripts that would exfiltrate secrets to stdout. This is the most critical security component — without it, the LLM can accidentally read and expose every API key. Must be implemented as a separate, dedicated hook (not combined with the general command guard).
-- Sanitize all external data (3-layer defense: pattern detection → markdown escaping → XML trust boundaries). XML wrapping must be paired with a `TRUST_BOUNDARY_INSTRUCTION` in the system prompt that explicitly tells Claude to treat anything inside `<external_data>` tags as data, not instructions — the wrapper without the instruction is half a defense.
-- **Pre-flight guardrail agent**: before the main heartbeat agent processes incoming external data, run a separate Claude Agent SDK call with `allowed_tools=[]` that receives the sanitized context and returns `{"verdict": "pass"|"fail"|"suspicious"}`. On `fail` → abort the heartbeat run and log the blocked content. On `suspicious` → proceed with a warning in the daily log. On `pass` → continue to the main reasoning call. This is the only semantic check in the security stack (the other layers are all pattern-based) and catches injection attempts that slip past deterministic regex. Wire it into the Phase 6 heartbeat flow between state-diffing and the main agent call — not as a standalone utility.
-- Command guardrails based on their Security Boundaries answers. Implementation must include a named `DANGEROUS_BASH_PATTERNS` list in `shared.py` with 30+ patterns covering destructive operations (`rm -rf`, `dd`, `mkfs`), credential exfiltration bypasses (`curl` to unknown hosts, `wget` piped to shell), package installation (`pip install`, `npm install`, `brew install`), privilege escalation (`sudo`, `chmod 777`), and outbound network calls to non-allowlisted domains. The check must recursively extract subshell `$(...)` and backtick `` `...` `` constructs and re-check their contents (naive string matching is bypassable via `$(echo rm\ -rf\ /)`). Strip common binary path prefixes (`/usr/bin/`, `/bin/`) before matching. This is distinct from `block-secrets.py` (which protects credential files) — `DANGEROUS_BASH_PATTERNS` protects against destructive and exfiltration commands, and both hooks run on every PreToolUse Bash call.
-- API key isolation (Python CLI wrapper pattern)
-- Key files, estimated complexity: Medium-High
-
-**Phase 9: Deployment**
-- Based on their Infrastructure answers
-- Local: OS scheduler setup (Windows Task Scheduler / cron / launchd)
-- If VPS: server setup, vault sync, SSH tunnel
-- **Vault sync with concat-both merge driver** (required if user picked "Local + VPS"): use git-sync (simonthum/git-sync or equivalent) on a 2-minute timer on both machines to sync the vault via Git. Daily logs (`Memory/daily/*.md`) are append-only and get written concurrently by heartbeat, reflection, chat, and flush processes on both machines — naive Git merging produces conflicts on every sync. Solution: register a custom `concat-both` merge driver in `.gitattributes` that maps `Memory/daily/*.md` to a script which concatenates additions from both sides instead of conflicting. The driver script (`git-merge-concat`) takes ancestor/local/remote versions, uses remote as base, appends any lines local added that aren't already present. Without this driver, vault sync will break within the first day of real use and the user will abandon the system. Must be a named deliverable with the script path, `.gitattributes` entry, and the `git config merge.concat-both.driver` registration command per machine.
-- Cost estimate based on their choices
-
-**Each phase includes:**
-- What to build (1-2 sentences)
-- Key files to create (with paths)
-- Dependencies (which phases must come first)
-- Estimated complexity (Low / Medium / High)
-- Personalization notes (how their specific answers shape this phase)
-- **CLAUDE.md update reminder**: Every phase must end by updating CLAUDE.md with any new paths, build commands, and conventions introduced. This keeps the agent's project reference current — if a command exists but isn't in CLAUDE.md, the agent won't know about it.
-
-**Footer:**
-- Recommended build order (phases are mostly sequential but some can parallel)
-- "This PRD was generated from your requirements. Revisit and update as your system evolves."
-
-5. **Confirm output** — Tell the user where the PRD was saved (the output path) and suggest they start with Phase 1.
-
-## Personalization Rules
-
-- Use THEIR vault folder name everywhere in file paths (not "Dynamous" — use whatever they wrote in "Memory vault folder name"). For example, if they wrote "SecondBrain", all paths should be `SecondBrain/Memory/`, `SecondBrain/Memory/daily/`, etc.
-- If they are NOT using Obsidian, don't mention Obsidian in the PRD — just refer to the vault as a "memory vault" or "markdown folder". If they ARE using Obsidian, mention it as the viewer/editor.
-- Use THEIR platform names everywhere (not generic "email" — use "Gmail" if that's what they chose)
-- Map their proactivity level to concrete behaviors:
-  - Observer → heartbeat notifications only, no drafting, no habit tracking
-  - Advisor → heartbeat + draft emails/messages for review, habit tracking with suggestions but no auto-check
-  - Assistant → heartbeat + drafts + auto-organize files + auto-log, habit auto-detection for objective pillars
-  - Partner → all of the above + send low-risk messages + auto-complete routine tasks + full habit auto-detection
-- Map their security boundaries directly into Phase 8 guardrail rules
-- Use their memory categories to structure the vault folders in Phase 1
-- Their integration priority determines Phase 4 order
+- [references/output-contract.md](references/output-contract.md) — the exact spec-bundle shape +
+  the handoff to `bootstrap-brain`.
+- `company_brain_seed_contract.md` (target vault) — company seed templates + per-company variables.
+- `onboarding_installer.md` (target vault) — the build spec `bootstrap-brain` follows (incl. the
+  recorded LinOS greenfield run).
+- `references/architecture-reference.md` — legacy blueprint; the current source of truth is the
+  live codebase + the two skills above. Use only for background.

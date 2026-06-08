@@ -113,4 +113,40 @@ Rank your top 3 integrations to build first (from your answers in Section 2):
 
 ---
 
-> After filling this out, run: `/create-second-brain-prd <path to this file>`
+## 9. Brain Role & Federation
+
+What KIND of brain is this, and does it connect to others? (This gates the whole build.)
+
+- **Role:**
+  - [ ] **Individual** — a personal brain serving one person (drafts in their voice).
+  - [ ] **Company** — an institutional brain serving multiple people (neutral voice, tiered access, governance-first).
+- **Federation:**
+  - [ ] **Singleton** — stands alone; no federation. (Simplest. Most solo clients.)
+  - [ ] **Producer** — an individual brain that **shares cleared, work-scoped knowledge into a company brain.** Name the company brain it feeds + the export scope tag: \_\_\_
+  - [ ] **Consumer** — this **is** a company brain that **receives** from producer brains. List the producer brains/scopes it consumes: \_\_\_
+- **This brain is for:** [ ] me  [ ] a teammate  [ ] a client (company): \_\_\_
+
+---
+
+## 10. Company / Client block — ONLY if Role = Company
+
+Skip if this is an individual brain.
+
+- **Company name / brain name:** \_\_\_ / \_\_\_  (e.g. "Protostack" / "LinOS")
+- **Company slug + default export scope tag:** \_\_\_
+- **Departments / teams:** \_\_\_
+- **Access tiers — who sees what** (fail-closed by default; deny unknown):
+  - **Full** (all knowledge): \_\_\_
+  - **Exec** (cross-department synthesis): \_\_\_
+  - **Dept** (own department + shared): \_\_\_
+- **Standards seeds** — durable company rules/values to seed `STANDARDS.md` (engineering, client-work, decision): \_\_\_
+- **Known decisions** — prior decisions to seed `DECISIONS.md` (with reversal triggers): \_\_\_
+- **Personas to enable** (governed skills): [ ] consolidator [ ] judge [ ] leadership-digest [ ] gap-analyst [ ] standards-review [ ] query
+- **Excluded entities** — names that must NEVER appear in surfaced output (reviewed, not invented): \_\_\_
+- **Channels** (for chat / comms-capture): surface + id + audience + ingestion mode (`ask-only`/`ingest-and-answer`/`digest-only`): \_\_\_
+
+---
+
+> After filling this out, run: `/create-second-brain-prd <path to this file>`. It emits the
+> **onboarding spec** (config + seeds) — NOT a build plan. Then run `bootstrap-brain` against
+> that spec to build the uniform, secure stack, and `diagnose-brain` to validate it.
