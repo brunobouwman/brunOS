@@ -136,6 +136,20 @@ Apply when `role == company`.
 | J5 | all | Sync services green | `vault-sync-state.json` + `code-sync-state.json` `consecutive_failures`==0 | degraded |
 | J6 | all | **Single-instance honored** | no dual-run of slackbot/heartbeat/reflect/dream across hosts | **critical (release-blocker)** |
 | J7 | all | Merge driver registered | `concat-both` in vault `.git/config` (per-clone) | degraded (daily-log conflicts) |
+| J8 | all | Agent/chat runtime tool config | three sub-checks (role-aware) — see note below | degraded |
+
+### J8 — Agent/chat runtime tool config (role-aware)
+
+Verify the brain's agent surfaces launch with the correct tool config + the expected skill set. Three sub-assertions:
+
+1. **`allowed_tools`** — the chat options factory sets `allowed_tools=["Read","Write","Edit","Bash"]` (`.claude/chat/bot.py`); the running daemon's startup log / session journal should reflect it. *(degraded if missing/narrowed.)*
+2. **`setting_sources=["project"]`** — confirmed in the same options block (so each session loads `CLAUDE.md` + the project skills). *(degraded if absent — skills + CLAUDE.md won't load.)*
+3. **Expected skills present** for the role (in the brain's skills dir / loaded per its CLAUDE.md):
+   - **Universal (all roles):** `vault-structure`(*) + `memory-search`.
+   - **Individual:** also `dev-task`.
+   - **Company:** also the company personas — `company-judge`, `company-query`, `company-leadership-digest`, `company-gap-analyst`, `company-consolidator`, `company-standards-review`.
+
+(*) `vault-structure` + `memory-search` are **bootstrap-generated and vault-unique** — each brain's copy describes ITS own vault, so they're expected to be **brain-local**, created during bootstrap, not inherited from the shared code repo. Their absence is a **bootstrap gap (scope: this-brain)**, not a code-sync gap. **BrunOS currently ships its instance as `brunos-vault`** (legacy name); accept that as the `vault-structure` instance until the rename + brain-local move lands in the bootstrap work.
 
 ---
 

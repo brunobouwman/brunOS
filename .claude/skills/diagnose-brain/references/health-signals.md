@@ -103,6 +103,8 @@
 | `chat/channel_registry.py` | Company-brain channel access gate (registry + allowlist) | `resolve_slack_event(...)` | — | `brain-config.json` (r) | decision.allowed for registered+enabled+allowlisted |
 | `chat/adapters/slack_adapter.py` | Bolt event registration (DM + @mention routing) | `register(...)` | — | — | events routed; replies threaded |
 
+**J8 runtime tool-config signal** (role-aware): the chat options factory at `chat/bot.py` (`allowed_tools=["Read","Write","Edit","Bash"]` + `setting_sources=["project"]`, ~L83-84) is the deterministic source — grep it, and confirm the running daemon's startup log / session journal reflects both. Then verify the **expected skills** exist in the brain's skills dir: universal `vault-structure`(*) + `memory-search`; individual `+ dev-task`; company `+ company-{judge,query,leadership-digest,gap-analyst,consolidator,standards-review}`. (*) `vault-structure`/`memory-search` are **bootstrap-generated, brain-local** (each describes its own vault) — BrunOS's instance is currently the `brunos-vault` skill (legacy name).
+
 ## 10 · Deploy / config helpers
 
 | Path | Purpose | CLI | State | Health signal |
