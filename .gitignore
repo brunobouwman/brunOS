@@ -34,6 +34,15 @@ BrunOS/
 # Packaged skill artifacts (regenerable via skill-creator/package_skill.py; source is tracked)
 dist/
 
+# Vault-unique skills are BRAIN-LOCAL, not shared code. They describe ONE brain's vault
+# (folders, frontmatter, retrieval paths), so shipping them to another brain mis-teaches it.
+# They live in .claude/skills/ so setting_sources=["project"] still loads them, but are
+# gitignored so code-sync never propagates them. Each brain's copy is created during
+# bootstrap (see Memory/projects/Brain/onboarding_installer.md "seed vault skills" step);
+# BrunOS's instances are hand-created and kept locally per host.
+.claude/skills/brunos-vault/
+.claude/skills/memory-search/
+
 # OS / editors
 .DS_Store
 Thumbs.db
