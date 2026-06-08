@@ -136,6 +136,24 @@ Apply when `role == company`.
 | J5 | all | Sync services green | `vault-sync-state.json` + `code-sync-state.json` `consecutive_failures`==0 | degraded |
 | J6 | all | **Single-instance honored** | no dual-run of slackbot/heartbeat/reflect/dream across hosts | **critical (release-blocker)** |
 | J7 | all | Merge driver registered | `concat-both` in vault `.git/config` (per-clone) | degraded (daily-log conflicts) |
+| J8 | all | Agent/chat runtime tool config | three sub-checks (role-aware) — see note below | degraded |
+
+### J8 — Agent/chat runtime tool config (role-aware)
+
+Verify the brain's agent surfaces launch with the correct tool config + the expected skill set. Three sub-assertions:
+
+1. **`allowed_tools`** — the chat options factory sets `allowed_tools=["Read","Write","Edit","Bash"]` (`.claude/chat/bot.py`); the running daemon's startup log / session journal should reflect it. *(degraded if missing/narrowed.)*
+2. **`setting_sources=["project"]`** — confirmed in the same options block (so each session loads `CLAUDE.md` + the project skills). *(degraded if absent — skills + CLAUDE.md won't load.)*
+3. **Expected skills present** for the role (in the brain's skills dir / loaded per its CLAUDE.md):
+   - **Universal (all roles):** `vault-structure`(*) + `memory-search`.
+   - **Individual:** also `dev-task`.
+   - **Company:** also the company personas — `company-judge`, `company-query`, `company-leadership-digest`, `company-gap-analyst`, `company-consolidator`, `company-standards-review`.
+
+(*) `vault-structure` + `memory-search` are **bootstrap-generated and vault-unique** — each brain's copy describes ITS own vault, so they're expected to be **brain-local**, created during bootstrap, not inherited from the shared code repo. Their absence is a **bootstrap gap (scope: this-brain)**, not a code-sync gap. **BrunOS currently ships its instance as `brunos-vault`** (legacy name); accept that as the `vault-structure` instance until the rename + brain-local move lands in the bootstrap work.
+
+4. **Hard-enforcement posture (mode-independent)** — a chat daemon has no human to approve at execution time, so the PreToolUse hooks **are** the enforcement: they fire *before* the permission check and hard-deny in ANY `permission_mode` (`dontAsk`, `acceptEdits`, even `bypassPermissions`). The safety layer is orthogonal to the approval prompt. Verify:
+   - **(a) Hooks inherited by the bot** — the daemon does NOT register hooks programmatically; it loads them purely via `setting_sources=["project"]` → `.claude/settings.json`. So J8(2) passing (`setting_sources=["project"]`) + I1 passing (the three hooks wired + ordered in `settings.json`) together prove the bot enforces them. If the bot set `setting_sources=None`, the hooks would NOT load and the daemon would be unguarded.
+   - **(b) Path-boundary guard present** — `.claude/hooks/path-boundary.py` registered in `settings.json` PreToolUse (`Bash|Edit|Write|MultiEdit|NotebookEdit`). It is **daemon-scoped** (`CLAUDE_INVOKED_BY ∈ {chat, heartbeat}` — interactive + dev-task pass through) and converts two SOUL rules from soft→hard: deny `Write`/`Edit` whose **resolved** target (symlinks + `..` collapsed) is outside the allowlist `{code-repo root, vault}`, and deny single-file destructive Bash (`rm`/`rmdir`/`unlink`/`shred`/`mv`/`truncate`/`find -delete`) **anywhere** (SOUL: never delete — archive or mark status). Bash reads (systemctl/journalctl/git status/query.py) unaffected. **Check:** the hook exists + is wired; for a daemon brain that LACKS it, this is **critical** (an autonomous, no-human daemon with no out-of-tree/delete boundary) — that's the exact gap LisaOS shows until it pulls the shared hook. Tests: `tests/test_path_boundary.py`.
 
 ---
 
