@@ -151,6 +151,10 @@ Verify the brain's agent surfaces launch with the correct tool config + the expe
 
 (*) `vault-structure` + `memory-search` are **bootstrap-generated and vault-unique** — each brain's copy describes ITS own vault, so they're expected to be **brain-local**, created during bootstrap, not inherited from the shared code repo. Their absence is a **bootstrap gap (scope: this-brain)**, not a code-sync gap. **BrunOS currently ships its instance as `brunos-vault`** (legacy name); accept that as the `vault-structure` instance until the rename + brain-local move lands in the bootstrap work.
 
+4. **Hard-enforcement posture (mode-independent)** — a chat daemon has no human to approve at execution time, so the PreToolUse hooks **are** the enforcement: they fire *before* the permission check and hard-deny in ANY `permission_mode` (`dontAsk`, `acceptEdits`, even `bypassPermissions`). The safety layer is orthogonal to the approval prompt. Verify:
+   - **(a) Hooks inherited by the bot** — the daemon does NOT register hooks programmatically; it loads them purely via `setting_sources=["project"]` → `.claude/settings.json`. So J8(2) passing (`setting_sources=["project"]`) + I1 passing (the three hooks wired + ordered in `settings.json`) together prove the bot enforces them. If the bot set `setting_sources=None`, the hooks would NOT load and the daemon would be unguarded.
+   - **(b) Path-boundary guard present** — deny `Write`/`Edit` whose **resolved** target (symlinks + `..` collapsed) is outside the brain's allowlist, and deny single-file destructive Bash (`rm <file>`, `mv <file>` out, `> file` truncation) outside it. **KNOWN GAP in BrunOS + LisaOS today:** `block-secrets.py` only gates credential/finance paths (nothing enforces the repo/vault boundary) and `dangerous-bash.py` only catches `rm -rf`/`rm -r`, not a single-file `rm`. Until the guard ships, SOUL "never delete" / "no out-of-tree write" live ONLY on the model honoring SOUL (soft). **This sub-check FAILS until the guard is built** — severity **degraded** for an interactive brain, **critical** for an autonomous daemon (chat/heartbeat) in a non-asking permission mode.
+
 ---
 
 ## Report shape
